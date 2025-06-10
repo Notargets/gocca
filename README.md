@@ -22,14 +22,39 @@ Go bindings for [OCCA](https://github.com/libocca/occa), a portable and vendor-n
 
 ## Installation
 
-First, install OCCA:
+### Install OCCA with GPU Support
+
+First, install OCCA with your desired backend support:
+
 ```bash
+# Clone OCCA
 git clone https://github.com/libocca/occa.git
 cd occa
+# Create build directory
 mkdir build && cd build
-cmake ..
+# Configure with desired backends
+# For CPU-only:
+cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local
+# For NVIDIA GPU support (requires CUDA toolkit):
+cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DOCCA_ENABLE_CUDA=ON
+# For AMD GPU support (requires ROCm):
+cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DOCCA_ENABLE_HIP=ON
+# For OpenCL support:
+cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DOCCA_ENABLE_OPENCL=ON
+# For OpenMP support:
+cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DOCCA_ENABLE_OPENMP=ON
+# Or enable multiple backends:
+cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local \
+         -DOCCA_ENABLE_CUDA=ON \
+         -DOCCA_ENABLE_OPENMP=ON \
+         -DOCCA_ENABLE_OPENCL=ON
+# Build and install
 make -j8
 sudo make install
+# Update library cache
+sudo ldconfig
+# Verify installation and check available backends
+occa info
 ```
 
 Set user environment variables
@@ -110,7 +135,32 @@ func main() {
 ```
 
 ## Examples
-See the examples directory for more usage examples.
+See the examples directory for more usage examples, for instance the 
+hello_world there compares CPU to GPU results and produces this:
+```aiignore
+OCCA CPU vs GPU Comparison
+==========================
+
+=== Running on Serial ===
+  N=    1000:     21.492µs  (correct: true)
+  N=   10000:       6.83µs  (correct: true)
+  N=  100000:    186.244µs  (correct: true)
+  N= 1000000:   1.604074ms  (correct: true)
+
+=== Running on CUDA ===
+  N=    1000:     46.191µs  (correct: true)
+  N=   10000:      9.013µs  (correct: true)
+  N=  100000:       7.04µs  (correct: true)
+  N= 1000000:      7.081µs  (correct: true)
+
+=== Trying OpenMP (Multi-threaded CPU) ===
+
+=== Running on OpenMP ===
+  N=    1000:   7.778554ms  (correct: true)
+  N=   10000:    7.96681ms  (correct: true)
+  N=  100000:   7.963294ms  (correct: true)
+  N= 1000000:    5.08593ms  (correct: true)
+```
 
 ## Contributing
 Contributions are welcome! Please feel free to submit a Pull Request.
