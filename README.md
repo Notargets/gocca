@@ -32,6 +32,19 @@ make -j8
 sudo make install
 ```
 
+Set user environment variables
+```bash
+# Required: Set OCCA installation directory
+export OCCA_DIR=/usr/local
+
+# Optional: Set cache directory (defaults to ~/.occa if not set)
+export OCCA_CACHE_DIR=$HOME/.occa
+
+# Add to your shell configuration for permanent setup
+echo 'export OCCA_DIR=/usr/local' >> ~/.bashrc
+source ~/.bashrc
+```
+
 Then install gocca:
 ```bash
 go get github.com/notargets/gocca
@@ -56,15 +69,43 @@ func main() {
     }
     defer device.Free()
 
+    // Define kernel source
+    kernelSource := `
+    @kernel void computeSquares(const int N,
+                                float *result) {
+        @outer for (int b = 0; b < N; b += 1) {
+            @inner for (int i = b; i < b + 1; ++i) {
+                if (i < N) {
+                    result[i] = i * i;
+                }
+            }
+        }
+    }`
+
     // Build kernel
-    kernel, err := device.BuildKernel(kernelSource, "myKernel")
+    kernel, err := device.BuildKernel(kernelSource, "computeSquares")
     if err != nil {
         log.Fatal(err)
     }
     defer kernel.Free()
 
-    // Run kernel
-    kernel.Run()
+    // Allocate memory for results
+    N := 10
+    resultMem := device.Malloc(int64(N*4), nil) // 4 bytes per float
+    defer resultMem.Free()
+
+    // Run kernel with arguments
+    kernel.RunWithArgs(N, resultMem)
+
+    // Copy results back to host
+    results := make([]float32, N)
+    resultMem.CopyToFloat32(results)
+    
+    // Print results
+    fmt.Println("Computed squares:")
+    for i, val := range results {
+        fmt.Printf("%d² = %.0f\n", i, val)
+    }
 }
 ```
 
