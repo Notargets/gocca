@@ -1,6 +1,7 @@
 # gocca - Go bindings for OCCA
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/<your-username>/gocca.svg)](https://pkg.go.dev/github.com/<your-username>/gocca)
+[![Go Reference](https://pkg.go.dev/badge/github.com/notargets/gocca.svg)]
+(https://pkg.go.dev/github.com/notargets/gocca)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 Go bindings for [OCCA](https://github.com/libocca/occa), a portable and vendor-neutral framework for parallel programming on heterogeneous platforms.
@@ -33,17 +34,18 @@ sudo make install
 
 Then install gocca:
 ```bash
-go get github.com/<your-username>/gocca
+go get github.com/notargets/gocca
 ```
 
-Quick Start
+## Quick Start
+
 ```go
 package main
 
 import (
     "fmt"
     "log"
-    "github.com/<your-username>/gocca"
+    "github.com/notargets/gocca"
 )
 
 func main() {
@@ -65,13 +67,16 @@ func main() {
     kernel.Run()
 }
 ```
-Examples
-See the examples directory for more usage examples.
-Contributing
-Contributions are welcome! Please feel free to submit a Pull Request.
-License
-This project is licensed under the MIT License - see the LICENSE file for details.
-Acknowledgments
 
+## Examples
+See the examples directory for more usage examples.
+
+## Contributing
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## License
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## Acknowledgments
 OCCA developers for the excellent parallel programming framework
 Inspired by other Go bindings projects like go-opencv

@@ -1,4 +1,4 @@
-package main
+package gocca
 
 /*
 #cgo CFLAGS: -I/usr/local/include
