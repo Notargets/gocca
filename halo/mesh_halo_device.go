@@ -186,7 +186,7 @@ func DeviceHaloExchange(device *gocca.OCCADevice, mesh *TestMesh2D) error {
 
 	// Step 3: Device-side copy from send to receive buffers
 	// In a real implementation, this would be MPI communication
-	simulateDeviceCopy(partData, d_sendBuffers, d_recvBuffers, Nfp)
+	onDeviceCopy(partData, d_sendBuffers, d_recvBuffers, Nfp)
 
 	// Step 4: Scatter received faces
 	for p, pd := range partData {
@@ -234,8 +234,8 @@ func initializeTestDataPerPartition(partData []PartitionHaloData, topo MeshTopol
 	}
 }
 
-// simulateDeviceCopy simulates MPI by copying between buffers
-func simulateDeviceCopy(partData []PartitionHaloData,
+// onDeviceCopy simulates MPI by copying between buffers
+func onDeviceCopy(partData []PartitionHaloData,
 	sendBuffers, recvBuffers []*gocca.OCCAMemory, Nfp int) {
 
 	// For each partition's sends
