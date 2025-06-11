@@ -2,8 +2,15 @@ package halo
 
 import (
 	"fmt"
-	"sort"
 )
+
+// Config represents the configuration for halo exchange
+type Config struct {
+	NPartitions  int
+	BufferStride int32
+	DataType     string // "float" or "double"
+	Nfp          int    // Face points per element
+}
 
 // MeshTopology represents the mesh connectivity information
 type MeshTopology struct {
@@ -19,335 +26,256 @@ type MeshTopology struct {
 	Fmask [][]int // [Nface][Nfp] Face mask - maps face points to volume points
 }
 
-// FaceExchange represents a face that needs to be exchanged
-type FaceExchange struct {
-	LocalElem    int  // Local element ID
-	LocalFace    int  // Local face ID
-	RemoteElem   int  // Remote element ID
-	RemoteFace   int  // Remote face ID
-	RemotePart   int  // Remote partition ID
-	IsLocal      bool // True if exchange is within partition
-	BufferOffset int  // Offset in the face buffer
+// FaceInfo just tracks what faces need to be exchanged
+type FaceInfo struct {
+	ElementID int // Global element ID
+	FaceID    int // Which face of that element
 }
 
-// PartitionHaloData contains all halo exchange info for one partition
-type PartitionHaloData struct {
-	PartitionID   int
-	LocalElements []int // Elements in this partition
+// HaloExchange contains minimal info for halo exchange
+type HaloExchange struct {
+	PartitionID int
 
-	// Face exchanges grouped by remote partition
-	RemoteExchanges map[int][]FaceExchange // [remotePart][]exchanges
-	LocalExchanges  []FaceExchange         // Internal partition exchanges
+	// Send info: which faces to send to each remote partition
+	SendFaces map[int][]FaceInfo // [destPartition][]faces
 
-	// Buffer layout
-	LocalFaceBuffer  int         // Size of local face buffer
-	RemoteFaceBuffer int         // Size of remote face buffer
-	BufferOffsets    map[int]int // [remotePart]->offset in remote buffer
+	// Receive info: which faces to receive from each remote partition
+	RecvFaces map[int][]FaceInfo // [srcPartition][]faces
 
-	// Gather/scatter maps
-	GatherMap        []int32 // Maps from volume points to send buffer
-	ScatterMap       []int32 // Maps from receive buffer to volume points
-	GatherPartitions []int32 // Which partition each gather goes to
+	// Local faces (within same partition)
+	LocalSend []FaceInfo
+	LocalRecv []FaceInfo
 }
 
-// BuildMeshHaloExchange constructs the halo exchange pattern for a partitioned mesh
-func BuildMeshHaloExchange(topo MeshTopology) map[int]*PartitionHaloData {
-	partitionData := make(map[int]*PartitionHaloData)
+// BuildSimpleHaloExchange creates a minimal exchange pattern
+func BuildSimpleHaloExchange(topo MeshTopology) []HaloExchange {
+	exchanges := make([]HaloExchange, topo.Npart)
 
-	// Initialize partition data
+	// Initialize
 	for p := 0; p < topo.Npart; p++ {
-		partitionData[p] = &PartitionHaloData{
-			PartitionID:     p,
-			RemoteExchanges: make(map[int][]FaceExchange),
-			BufferOffsets:   make(map[int]int),
+		exchanges[p] = HaloExchange{
+			PartitionID: p,
+			SendFaces:   make(map[int][]FaceInfo),
+			RecvFaces:   make(map[int][]FaceInfo),
 		}
 	}
 
-	// Build element lists for each partition
-	for e := 0; e < topo.K; e++ {
-		p := topo.EtoP[e]
-		partitionData[p].LocalElements = append(partitionData[p].LocalElements, e)
-	}
+	// Single pass through all elements to identify exchanges
+	for elem := 0; elem < topo.K; elem++ {
+		srcPart := topo.EtoP[elem]
 
-	// Analyze face connectivity
-	for e := 0; e < topo.K; e++ {
-		localPart := topo.EtoP[e]
-		pd := partitionData[localPart]
-
-		for f := 0; f < topo.Nface; f++ {
-			neighborElem := topo.EtoE[e][f]
-			neighborFace := topo.EtoF[e][f]
-
-			// Skip boundary faces
-			if neighborElem < 0 || neighborElem >= topo.K {
-				continue
+		for face := 0; face < topo.Nface; face++ {
+			neighbor := topo.EtoE[elem][face]
+			if neighbor < 0 || neighbor >= topo.K {
+				continue // Skip boundaries
 			}
 
-			neighborPart := topo.EtoP[neighborElem]
+			dstPart := topo.EtoP[neighbor]
+			neighborFace := topo.EtoF[elem][face]
 
-			exchange := FaceExchange{
-				LocalElem:  e,
-				LocalFace:  f,
-				RemoteElem: neighborElem,
-				RemoteFace: neighborFace,
-				RemotePart: neighborPart,
-				IsLocal:    localPart == neighborPart,
-			}
-
-			if exchange.IsLocal {
-				pd.LocalExchanges = append(pd.LocalExchanges, exchange)
+			if srcPart == dstPart {
+				// Local exchange
+				exchanges[srcPart].LocalSend = append(
+					exchanges[srcPart].LocalSend,
+					FaceInfo{elem, face})
+				exchanges[srcPart].LocalRecv = append(
+					exchanges[srcPart].LocalRecv,
+					FaceInfo{neighbor, neighborFace})
 			} else {
-				pd.RemoteExchanges[neighborPart] = append(pd.RemoteExchanges[neighborPart], exchange)
+				// Remote exchange - only add if we haven't seen this face before
+				// (avoid duplicates from symmetric connectivity)
+				if elem < neighbor {
+					exchanges[srcPart].SendFaces[dstPart] = append(
+						exchanges[srcPart].SendFaces[dstPart],
+						FaceInfo{elem, face})
+					exchanges[dstPart].RecvFaces[srcPart] = append(
+						exchanges[dstPart].RecvFaces[srcPart],
+						FaceInfo{neighbor, neighborFace})
+				}
 			}
 		}
 	}
 
-	// Build optimized buffer layout for each partition
-	for p := 0; p < topo.Npart; p++ {
-		buildOptimizedBufferLayout(partitionData[p], topo)
-	}
-
-	return partitionData
+	return exchanges
 }
 
-// buildOptimizedBufferLayout creates contiguous buffer regions for efficient communication
-func buildOptimizedBufferLayout(pd *PartitionHaloData, topo MeshTopology) {
-	offset := 0
-
-	// First, allocate space for local exchanges
-	for i := range pd.LocalExchanges {
-		pd.LocalExchanges[i].BufferOffset = offset
-		offset += topo.Nfp
-	}
-	pd.LocalFaceBuffer = offset
-
-	// Then, group remote exchanges by partition for contiguous sends
-	remotePartitions := make([]int, 0, len(pd.RemoteExchanges))
-	for rp := range pd.RemoteExchanges {
-		remotePartitions = append(remotePartitions, rp)
-	}
-	sort.Ints(remotePartitions)
-
-	// Allocate contiguous regions for each remote partition
-	for _, rp := range remotePartitions {
-		pd.BufferOffsets[rp] = offset
-		exchanges := pd.RemoteExchanges[rp]
-
-		for i := range exchanges {
-			exchanges[i].BufferOffset = offset
-			offset += topo.Nfp
-		}
-	}
-	pd.RemoteFaceBuffer = offset - pd.LocalFaceBuffer
-
-	// Build gather/scatter maps
-	buildGatherScatterMaps(pd, topo)
+// GetSimpleHaloKernels returns minimal kernels for halo exchange
+func GetSimpleHaloKernels(cfg Config) string {
+	return fmt.Sprintf(`
+// Simple gather kernel - just pack face data contiguously
+@kernel void simpleGatherFaces(const int nFaces,
+                               const int Np,
+                               const int Nfp,
+                               @restrict const int *elements,
+                               @restrict const int *faces,
+                               @restrict const int *fmask,
+                               @restrict const %s *Q,
+                               @restrict %s *sendBuffer) {
+    for (int i = 0; i < nFaces; ++i; @outer) {
+        for (int fp = 0; fp < Nfp; ++fp; @inner) {
+            const int elem = elements[i];
+            const int face = faces[i];
+            const int volPoint = fmask[face * Nfp + fp];
+            
+            sendBuffer[i * Nfp + fp] = Q[elem * Np + volPoint];
+        }
+    }
 }
 
-// buildGatherScatterMaps creates the index maps for gather/scatter operations
-func buildGatherScatterMaps(pd *PartitionHaloData, topo MeshTopology) {
-	totalExchanges := len(pd.LocalExchanges)
-	for _, exchanges := range pd.RemoteExchanges {
-		totalExchanges += len(exchanges)
-	}
-
-	gatherMap := make([]int32, totalExchanges*topo.Nfp)
-	scatterMap := make([]int32, totalExchanges*topo.Nfp)
-	gatherPartitions := make([]int32, totalExchanges)
-
-	idx := 0
-
-	// Map local exchanges
-	for _, ex := range pd.LocalExchanges {
-		gatherPartitions[idx] = int32(pd.PartitionID) // Local
-
-		// Use fmask to map face points to volume points
-		for fp := 0; fp < topo.Nfp; fp++ {
-			volPoint := topo.Fmask[ex.LocalFace][fp]
-			gatherMap[idx*topo.Nfp+fp] = int32(ex.LocalElem*topo.Np + volPoint)
-
-			// For scatter, we write to the neighbor's face location
-			neighborVolPoint := topo.Fmask[ex.RemoteFace][fp]
-			scatterMap[idx*topo.Nfp+fp] = int32(ex.RemoteElem*topo.Np + neighborVolPoint)
-		}
-		idx++
-	}
-
-	// Map remote exchanges
-	for rp, exchanges := range pd.RemoteExchanges {
-		for _, ex := range exchanges {
-			gatherPartitions[idx] = int32(rp)
-
-			for fp := 0; fp < topo.Nfp; fp++ {
-				volPoint := topo.Fmask[ex.LocalFace][fp]
-				gatherMap[idx*topo.Nfp+fp] = int32(ex.LocalElem*topo.Np + volPoint)
-
-				// Scatter will be handled by the remote partition
-				scatterMap[idx*topo.Nfp+fp] = int32(ex.BufferOffset + fp)
-			}
-			idx++
-		}
-	}
-
-	pd.GatherMap = gatherMap
-	pd.ScatterMap = scatterMap
-	pd.GatherPartitions = gatherPartitions
+// Simple scatter kernel - unpack face data to ghost cells
+@kernel void simpleScatterFaces(const int nFaces,
+                                const int Np,
+                                const int Nfp,
+                                @restrict const int *elements,
+                                @restrict const int *faces,
+                                @restrict const int *fmask,
+                                @restrict const %s *recvBuffer,
+                                @restrict %s *Qghost) {
+    for (int i = 0; i < nFaces; ++i; @outer) {
+        for (int fp = 0; fp < Nfp; ++fp; @inner) {
+            const int elem = elements[i];
+            const int face = faces[i];
+            const int volPoint = fmask[face * Nfp + fp];
+            
+            Qghost[elem * Np + volPoint] = recvBuffer[i * Nfp + fp];
+        }
+    }
 }
 
-// GetMeshHaloKernels returns kernels optimized for mesh face exchange
-func GetMeshHaloKernels(cfg Config) string {
-	return GetCommunicationStructs(cfg) + `
-    
-    // Gather face data using fmask mapping
-    @kernel void meshGatherFaces(const int nFaces,
+// Direct local exchange - no buffer needed
+@kernel void simpleLocalExchange(const int nPairs,
                                  const int Np,
                                  const int Nfp,
-                                 const int *elements,
-                                 const int *faces,
-                                 const int *fmask,  // [Nface][Nfp] flattened
-                                 const DTYPE *Q,     // [K][Np] flattened
-                                 DTYPE *faceBuffer) {
-        @outer for (int i = 0; i < nFaces; ++i) {
-            @inner for (int fp = 0; fp < Nfp; ++fp) {
-                const int elem = elements[i];
-                const int face = faces[i];
-                
-                // Get volume point index from fmask
-                const int volPoint = fmask[face * Nfp + fp];
-                const int qIdx = elem * Np + volPoint;
-                
-                faceBuffer[i * Nfp + fp] = Q[qIdx];
-            }
+                                 @restrict const int *sendElems,
+                                 @restrict const int *sendFaces,
+                                 @restrict const int *recvElems,
+                                 @restrict const int *recvFaces,
+                                 @restrict const int *fmask,
+                                 @restrict const %s *Q,
+                                 @restrict %s *Qghost) {
+    for (int pair = 0; pair < nPairs; ++pair; @outer) {
+        for (int fp = 0; fp < Nfp; ++fp; @inner) {
+            const int srcElem = sendElems[pair];
+            const int srcFace = sendFaces[pair];
+            const int dstElem = recvElems[pair];
+            const int dstFace = recvFaces[pair];
+            
+            const int srcPoint = fmask[srcFace * Nfp + fp];
+            const int dstPoint = fmask[dstFace * Nfp + fp];
+            
+            Qghost[dstElem * Np + dstPoint] = Q[srcElem * Np + srcPoint];
         }
     }
-    
-    // Optimized gather for contiguous remote sends
-    @kernel void meshGatherRemote(const int nPartitions,
-                                  const int *partitionOffsets,
-                                  const int *partitionCounts,
-                                  const int Np,
-                                  const int Nfp,
-                                  const int *gatherMap,
-                                  const DTYPE *Q,
-                                  DTYPE *sendBuffers) {
-        @outer for (int p = 0; p < nPartitions; ++p) {
-            @inner for (int i = 0; i < 1; ++i) {
-                const int offset = partitionOffsets[p];
-                const int count = partitionCounts[p];
-                const int bufferBase = p * FLOATS_PER_STRIDE;
-                
-                for (int f = 0; f < count; ++f) {
-                    for (int fp = 0; fp < Nfp; ++fp) {
-                        const int mapIdx = (offset + f) * Nfp + fp;
-                        const int bufIdx = bufferBase + f * Nfp + fp;
-                        
-                        sendBuffers[bufIdx] = Q[gatherMap[mapIdx]];
-                    }
-                }
-            }
-        }
-    }
-    
-    // Scatter received face data to ghost/halo regions
-    @kernel void meshScatterFaces(const int nFaces,
-                                  const int Np,
-                                  const int Nfp,
-                                  const int *elements,
-                                  const int *faces,
-                                  const int *fmask,
-                                  const DTYPE *faceBuffer,
-                                  DTYPE *ghostData) {
-        @outer for (int i = 0; i < nFaces; ++i) {
-            @inner for (int fp = 0; fp < Nfp; ++fp) {
-                const int elem = elements[i];
-                const int face = faces[i];
-                
-                // Get volume point index from fmask
-                const int volPoint = fmask[face * Nfp + fp];
-                const int ghostIdx = elem * Np + volPoint;
-                
-                ghostData[ghostIdx] = faceBuffer[i * Nfp + fp];
-            }
-        }
-    }
-    
-    // Combined local face exchange (no MPI needed)
-    @kernel void meshLocalFaceExchange(const int nExchanges,
-                                       const int Np,
-                                       const int Nfp,
-                                       const int *srcElements,
-                                       const int *srcFaces,
-                                       const int *dstElements,
-                                       const int *dstFaces,
-                                       const int *fmask,
-                                       const DTYPE *Q,
-                                       DTYPE *Qhalo) {
-        @outer for (int ex = 0; ex < nExchanges; ++ex) {
-            @inner for (int fp = 0; fp < Nfp; ++fp) {
-                const int srcElem = srcElements[ex];
-                const int srcFace = srcFaces[ex];
-                const int dstElem = dstElements[ex];
-                const int dstFace = dstFaces[ex];
-                
-                // Get source value
-                const int srcVolPoint = fmask[srcFace * Nfp + fp];
-                const int srcIdx = srcElem * Np + srcVolPoint;
-                const DTYPE value = Q[srcIdx];
-                
-                // Write to destination 
-                const int dstVolPoint = fmask[dstFace * Nfp + fp];
-                const int dstIdx = dstElem * Np + dstVolPoint;
-                Qhalo[dstIdx] = value;
-            }
-        }
-    }`
+}`, cfg.DataType, cfg.DataType, cfg.DataType, cfg.DataType, cfg.DataType, cfg.DataType)
 }
 
-// GenerateHaloReport creates a summary of the halo exchange pattern
-func GenerateHaloReport(partitionData map[int]*PartitionHaloData, topo MeshTopology) string {
-	report := fmt.Sprintf("=== Mesh Halo Exchange Report ===\n")
-	report += fmt.Sprintf("Mesh: %d elements, %d partitions\n", topo.K, topo.Npart)
-	report += fmt.Sprintf("Element: %d volume points, %d faces with %d points each\n\n",
-		topo.Np, topo.Nface, topo.Nfp)
+// Example usage in a driver
+func ExampleHaloExchangeDriver(partition int, exchange HaloExchange,
+	topo MeshTopology, device interface{}) {
+
+	// Step 1: Do local exchanges (no MPI needed)
+	if len(exchange.LocalSend) > 0 {
+		// Pack element/face arrays
+		sendElems := make([]int32, len(exchange.LocalSend))
+		sendFaces := make([]int32, len(exchange.LocalSend))
+		recvElems := make([]int32, len(exchange.LocalRecv))
+		recvFaces := make([]int32, len(exchange.LocalRecv))
+
+		for i := range exchange.LocalSend {
+			sendElems[i] = int32(exchange.LocalSend[i].ElementID)
+			sendFaces[i] = int32(exchange.LocalSend[i].FaceID)
+			recvElems[i] = int32(exchange.LocalRecv[i].ElementID)
+			recvFaces[i] = int32(exchange.LocalRecv[i].FaceID)
+		}
+
+		// Call kernel for local exchange
+		// kernel.Run(len(exchange.LocalSend), ...)
+	}
+
+	// Step 2: Pack remote sends
+	for destPart, faces := range exchange.SendFaces {
+		nFaces := len(faces)
+		if nFaces == 0 {
+			continue
+		}
+
+		// Create send buffer for this destination
+		sendBuffer := make([]float32, nFaces*topo.Nfp)
+		_ = sendBuffer
+
+		// Pack element/face info
+		elements := make([]int32, nFaces)
+		faceIDs := make([]int32, nFaces)
+		for i, f := range faces {
+			elements[i] = int32(f.ElementID)
+			faceIDs[i] = int32(f.FaceID)
+		}
+
+		// Call gather kernel
+		// kernel.Run(nFaces, ...)
+
+		// MPI_Send(sendBuffer, destPart, ...)
+		_ = destPart // Suppress unused variable warning
+	}
+
+	// Step 3: Receive and unpack
+	for srcPart, faces := range exchange.RecvFaces {
+		nFaces := len(faces)
+		if nFaces == 0 {
+			continue
+		}
+
+		// MPI_Recv(recvBuffer, srcPart, ...)
+
+		// Unpack using scatter kernel
+		// kernel.Run(nFaces, ...)
+		_ = srcPart // Suppress unused variable warning
+	}
+}
+
+// GenerateSimpleReport creates a summary of the exchange pattern
+func GenerateSimpleReport(exchanges []HaloExchange, topo MeshTopology) string {
+	report := fmt.Sprintf("=== Simple Halo Exchange Report ===\n")
+	report += fmt.Sprintf("Mesh: %d elements, %d partitions\n\n", topo.K, topo.Npart)
 
 	totalLocal := 0
 	totalRemote := 0
 
-	for p := 0; p < topo.Npart; p++ {
-		pd := partitionData[p]
-		localFaces := len(pd.LocalExchanges)
-		remoteFaces := 0
-		for _, exchanges := range pd.RemoteExchanges {
-			remoteFaces += len(exchanges)
+	for _, ex := range exchanges {
+		localPairs := len(ex.LocalSend)
+		remoteSend := 0
+		remoteRecv := 0
+
+		for _, faces := range ex.SendFaces {
+			remoteSend += len(faces)
+		}
+		for _, faces := range ex.RecvFaces {
+			remoteRecv += len(faces)
 		}
 
-		totalLocal += localFaces
-		totalRemote += remoteFaces
+		totalLocal += localPairs
+		totalRemote += remoteSend
 
-		report += fmt.Sprintf("Partition %d:\n", p)
-		report += fmt.Sprintf("  Elements: %d\n", len(pd.LocalElements))
-		report += fmt.Sprintf("  Local face exchanges: %d\n", localFaces)
-		report += fmt.Sprintf("  Remote face exchanges: %d\n", remoteFaces)
+		report += fmt.Sprintf("Partition %d:\n", ex.PartitionID)
+		report += fmt.Sprintf("  Local exchanges: %d face pairs\n", localPairs)
+		report += fmt.Sprintf("  Remote sends: %d faces to %d partitions\n",
+			remoteSend, len(ex.SendFaces))
+		report += fmt.Sprintf("  Remote recvs: %d faces from %d partitions\n",
+			remoteRecv, len(ex.RecvFaces))
 
-		if remoteFaces > 0 {
-			report += fmt.Sprintf("  Remote partners: ")
-			for rp := range pd.RemoteExchanges {
-				report += fmt.Sprintf("P%d(%d faces) ", rp, len(pd.RemoteExchanges[rp]))
+		if len(ex.SendFaces) > 0 {
+			report += "  Send to: "
+			for p, faces := range ex.SendFaces {
+				report += fmt.Sprintf("P%d(%d) ", p, len(faces))
 			}
 			report += "\n"
 		}
-
-		report += fmt.Sprintf("  Buffer sizes: local=%d, remote=%d face points\n",
-			pd.LocalFaceBuffer/topo.Nfp, pd.RemoteFaceBuffer/topo.Nfp)
 		report += "\n"
 	}
 
 	report += fmt.Sprintf("Summary:\n")
-	report += fmt.Sprintf("  Total local exchanges: %d face pairs\n", totalLocal/2)
-	report += fmt.Sprintf("  Total remote exchanges: %d face pairs\n", totalRemote/2)
-
-	efficiency := float64(totalLocal) / float64(totalLocal+totalRemote) * 100
-	report += fmt.Sprintf("  Local communication: %.1f%%\n", efficiency)
+	report += fmt.Sprintf("  Total local exchanges: %d\n", totalLocal)
+	report += fmt.Sprintf("  Total remote exchanges: %d\n", totalRemote)
 
 	return report
 }

@@ -1,10 +1,5 @@
 package halo
 
-import (
-	"github.com/notargets/gocca"
-	"testing"
-)
-
 func createTestMesh2D() MeshTopology {
 	// Create a simple 2D mesh: 4x4 elements, partitioned into 4 quadrants
 	// Each element is a quad with 4 faces
@@ -103,71 +98,4 @@ func createTestMesh2D() MeshTopology {
 		EtoF:  EtoF,
 		Fmask: Fmask,
 	}
-}
-
-func TestMeshHaloExchange(t *testing.T) {
-	topo := createTestMesh2D()
-
-	// Build halo exchange pattern
-	partitionData := BuildMeshHaloExchange(topo)
-
-	// Generate report
-	report := GenerateHaloReport(partitionData, topo)
-	t.Log("\n" + report)
-
-	// Test partition 0
-	pd0 := partitionData[0]
-
-	// Should have 4 elements
-	if len(pd0.LocalElements) != 4 {
-		t.Errorf("Partition 0 should have 4 elements, got %d", len(pd0.LocalElements))
-	}
-
-	// Check local exchanges (within partition)
-	localCount := len(pd0.LocalExchanges)
-	t.Logf("Partition 0 local exchanges: %d", localCount)
-
-	// Check remote exchanges
-	remoteCount := 0
-	for rp, exchanges := range pd0.RemoteExchanges {
-		remoteCount += len(exchanges)
-		t.Logf("Partition 0 -> Partition %d: %d face exchanges", rp, len(exchanges))
-	}
-
-	// Verify buffer layout
-	totalBuffer := pd0.LocalFaceBuffer + pd0.RemoteFaceBuffer
-	expectedBuffer := (localCount + remoteCount) * topo.Nfp
-	if totalBuffer != expectedBuffer {
-		t.Errorf("Buffer size mismatch: got %d, expected %d", totalBuffer, expectedBuffer)
-	}
-
-	// Test gather map
-	if len(pd0.GatherMap) != (localCount+remoteCount)*topo.Nfp {
-		t.Errorf("Gather map size incorrect: got %d, expected %d",
-			len(pd0.GatherMap), (localCount+remoteCount)*topo.Nfp)
-	}
-}
-
-func TestMeshGatherKernel(t *testing.T) {
-	device, err := gocca.NewDevice(`{"mode": "Serial"}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer device.Free()
-
-	cfg := Config{
-		NPartitions:  4,
-		BufferStride: 128 * 1024,
-		DataType:     "float",
-		Nfp:          3,
-	}
-
-	kernelSource := GetMeshHaloKernels(cfg)
-	gatherKernel, err := device.BuildKernel(kernelSource, "meshGatherFaces")
-	if err != nil {
-		t.Fatalf("Failed to build mesh gather kernel: %v", err)
-	}
-	defer gatherKernel.Free()
-
-	t.Log("Mesh gather kernel compiled successfully")
 }
