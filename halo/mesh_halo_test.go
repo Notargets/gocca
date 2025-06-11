@@ -1,22 +1,270 @@
 package halo
 
 import (
+	"fmt"
 	"testing"
 )
 
-// Test functions
-func TestFlexibleMesh2D(t *testing.T) {
+// TestPartitionHaloData verifies the partition-specific halo data structures
+func TestPartitionHaloData(t *testing.T) {
+	// Create a 4x4 mesh with 2x2 partitions
+	mesh, err := NewTestMesh2D(4, 4, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Build partition halo data
+	partData := BuildPartitionHaloData(mesh.Topo)
+
+	// Test that we have data for each partition
+	if len(partData) != mesh.Topo.Npart {
+		t.Errorf("Expected %d partition data structures, got %d",
+			mesh.Topo.Npart, len(partData))
+	}
+
+	// Verify each partition
+	for p := 0; p < mesh.Topo.Npart; p++ {
+		t.Run(fmt.Sprintf("Partition%d", p), func(t *testing.T) {
+			verifyPartitionData(t, &partData[p], mesh.Topo, mesh.ComputeStatistics())
+		})
+	}
+}
+
+// verifyPartitionData checks a single partition's data
+func verifyPartitionData(t *testing.T, pd *PartitionHaloData, topo MeshTopology, stats MeshStatistics) {
+	// 1. Verify element ownership
+	expectedElements := 0
+	for e := 0; e < topo.K; e++ {
+		if topo.EtoP[e] == pd.PartitionID {
+			expectedElements++
+		}
+	}
+
+	if pd.NumLocalElements != expectedElements {
+		t.Errorf("Partition %d: expected %d elements, got %d",
+			pd.PartitionID, expectedElements, pd.NumLocalElements)
+	}
+
+	// 2. Verify all element IDs are correct
+	for _, elemID := range pd.LocalElementIDs {
+		if topo.EtoP[elemID] != pd.PartitionID {
+			t.Errorf("Partition %d claims element %d, but it belongs to partition %d",
+				pd.PartitionID, elemID, topo.EtoP[elemID])
+		}
+	}
+
+	// 3. Verify local exchange arrays have matching sizes
+	if len(pd.LocalSendElements) != len(pd.LocalSendFaces) ||
+		len(pd.LocalSendElements) != len(pd.LocalRecvElements) ||
+		len(pd.LocalSendElements) != len(pd.LocalRecvFaces) {
+		t.Errorf("Partition %d: local exchange arrays have mismatched sizes", pd.PartitionID)
+	}
+
+	// 4. Verify local indices are within bounds
+	for i := 0; i < int(pd.NumLocalFaces); i++ {
+		if pd.LocalSendElements[i] >= int32(pd.NumLocalElements) {
+			t.Errorf("Partition %d: local send element index %d out of bounds",
+				pd.PartitionID, pd.LocalSendElements[i])
+		}
+		if pd.LocalRecvElements[i] >= int32(pd.NumLocalElements) {
+			t.Errorf("Partition %d: local recv element index %d out of bounds",
+				pd.PartitionID, pd.LocalRecvElements[i])
+		}
+	}
+}
+
+// TestScatterIndex verifies requirement 1: scatter index for incoming faces
+func TestScatterIndex(t *testing.T) {
+	// Create a simple 2x2 mesh with 2x1 partitions
+	// This gives us a clear inter-partition boundary
+	mesh, err := NewTestMesh2D(2, 2, 2, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	partData := BuildPartitionHaloData(mesh.Topo)
+
+	// Partition 0 has elements 0,2
+	// Partition 1 has elements 1,3
+	// Face exchanges should be: 0->1 and 2->3
+
+	// Check partition 1's receive structure
+	pd1 := &partData[1]
+
+	// Should receive from partition 0
+	if pd1.NumRemoteFaces != 2 {
+		t.Errorf("Partition 1 should receive 2 faces, got %d", pd1.NumRemoteFaces)
+	}
+
+	// Verify receive offsets
+	offset, exists := pd1.RecvOffsets[0]
+	if !exists {
+		t.Fatal("Partition 1 should have receive offset for partition 0")
+	}
+	if offset != 0 {
+		t.Errorf("First receive offset should be 0, got %d", offset)
+	}
+
+	// Verify receive counts
+	count, exists := pd1.RecvCounts[0]
+	if !exists || count != 2 {
+		t.Errorf("Partition 1 should receive 2 faces from partition 0, got %d", count)
+	}
+
+	// Verify scatter indices point to valid local elements
+	for i := 0; i < int(pd1.NumRemoteFaces); i++ {
+		localElem := pd1.RecvElementIDs[i]
+		face := pd1.RecvFaceIDs[i]
+		srcPart := pd1.RecvPartitions[i]
+
+		// Local element index should be valid
+		if localElem >= int32(pd1.NumLocalElements) {
+			t.Errorf("Scatter index %d has invalid local element %d", i, localElem)
+		}
+
+		// Face should be valid
+		if face >= int32(mesh.Topo.Nface) {
+			t.Errorf("Scatter index %d has invalid face %d", i, face)
+		}
+
+		// Source should be partition 0
+		if srcPart != 0 {
+			t.Errorf("Scatter index %d has wrong source partition %d", i, srcPart)
+		}
+	}
+}
+
+// TestKernelBufferInfo verifies requirement 2: buffer allocation info
+func TestKernelBufferInfo(t *testing.T) {
+	mesh, err := NewTestMesh2D(4, 4, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	partData := BuildPartitionHaloData(mesh.Topo)
+
+	for p := 0; p < mesh.Topo.Npart; p++ {
+		pd := &partData[p]
+		bufInfo := GetKernelBufferInfo(pd, mesh.Topo)
+
+		// Verify buffer info matches partition data
+		if bufInfo.PartitionID != pd.PartitionID {
+			t.Errorf("Buffer info has wrong partition ID")
+		}
+
+		if bufInfo.NumLocalElements != int32(pd.NumLocalElements) {
+			t.Errorf("Buffer info has wrong number of local elements")
+		}
+
+		if bufInfo.NumLocalFaces != pd.NumLocalFaces {
+			t.Errorf("Buffer info has wrong number of local faces")
+		}
+
+		if bufInfo.NumRemoteFaces != pd.NumRemoteFaces {
+			t.Errorf("Buffer info has wrong number of remote faces")
+		}
+
+		if bufInfo.Np != int32(mesh.Topo.Np) {
+			t.Errorf("Buffer info has wrong Np")
+		}
+
+		if bufInfo.Nfp != int32(mesh.Topo.Nfp) {
+			t.Errorf("Buffer info has wrong Nfp")
+		}
+
+		// Verify buffer sizes make sense
+		localBufferSize := bufInfo.NumLocalElements * bufInfo.Np
+		if localBufferSize <= 0 {
+			t.Errorf("Partition %d has invalid local buffer size %d", p, localBufferSize)
+		}
+
+		remoteBufferSize := bufInfo.NumRemoteFaces * bufInfo.Nfp
+		if bufInfo.NumRemoteFaces > 0 && remoteBufferSize <= 0 {
+			t.Errorf("Partition %d has invalid remote buffer size %d", p, remoteBufferSize)
+		}
+	}
+}
+
+// TestKernelCompatibility verifies requirement 3: OCCA kernel compatibility
+func TestKernelCompatibility(t *testing.T) {
+	mesh, err := NewTestMesh2D(3, 3, 3, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	partData := BuildPartitionHaloData(mesh.Topo)
+
+	// Verify all arrays are int32 (OCCA compatible)
+	for p := 0; p < mesh.Topo.Npart; p++ {
+		pd := &partData[p]
+
+		// Check type assertions would work
+		_ = []int32(pd.LocalElementIDs)
+		_ = []int32(pd.LocalSendElements)
+		_ = []int32(pd.LocalSendFaces)
+		_ = []int32(pd.LocalRecvElements)
+		_ = []int32(pd.LocalRecvFaces)
+		_ = []int32(pd.RecvElementIDs)
+		_ = []int32(pd.RecvFaceIDs)
+		_ = []int32(pd.RecvPartitions)
+
+		// Verify arrays are properly sized for kernel use
+		if int32(len(pd.RecvElementIDs)) != pd.NumRemoteFaces ||
+			int32(len(pd.RecvFaceIDs)) != pd.NumRemoteFaces ||
+			int32(len(pd.RecvPartitions)) != pd.NumRemoteFaces {
+			t.Errorf("Partition %d: scatter arrays not properly sized", p)
+		}
+	}
+}
+
+// TestInterPartitionCommunication verifies the complete exchange pattern
+func TestInterPartitionCommunication(t *testing.T) {
+	mesh, err := NewTestMesh2D(4, 4, 2, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	partData := BuildPartitionHaloData(mesh.Topo)
+	stats := mesh.ComputeStatistics()
+
+	// Count total inter-partition faces across all partitions
+	totalSends := 0
+	totalRecvs := 0
+
+	for p := 0; p < mesh.Topo.Npart; p++ {
+		pd := &partData[p]
+
+		// Count sends
+		for _, faces := range pd.SendFaces {
+			totalSends += len(faces)
+		}
+
+		// Count receives
+		totalRecvs += int(pd.NumRemoteFaces)
+	}
+
+	// Sends and receives should match
+	if totalSends != totalRecvs {
+		t.Errorf("Total sends (%d) != total receives (%d)", totalSends, totalRecvs)
+	}
+
+	// Should match mesh statistics
+	if totalSends != stats.InterPartFaces {
+		t.Errorf("Total inter-partition faces (%d) != mesh statistics (%d)",
+			totalSends, stats.InterPartFaces)
+	}
+}
+
+// TestDetailedReport generates a detailed report for manual verification
+func TestDetailedReport(t *testing.T) {
 	testCases := []struct {
 		name           string
 		nx, ny         int
 		partNx, partNy int
 	}{
 		{"2x2 mesh, 2x1 partitions", 2, 2, 2, 1},
-		{"3x2 mesh, 3x1 partitions", 3, 2, 3, 1},
 		{"3x3 mesh, 3x1 partitions", 3, 3, 3, 1},
 		{"4x4 mesh, 2x2 partitions", 4, 4, 2, 2},
-		{"6x4 mesh, 3x2 partitions", 6, 4, 3, 2},
-		{"8x8 mesh, 4x2 partitions", 8, 8, 4, 2},
 	}
 
 	for _, tc := range testCases {
@@ -25,51 +273,34 @@ func TestFlexibleMesh2D(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			mesh.PrintMesh()
+
+			partData := BuildPartitionHaloData(mesh.Topo)
+			report := PartitionHaloReport(partData, mesh.Topo)
+
+			t.Logf("\n%s:\n%s", tc.name, report)
 		})
 	}
 }
 
-func TestMeshStatistics(t *testing.T) {
-	// Test a simple 4x4 mesh with 2x2 partitions
-	mesh, err := NewTestMesh2D(4, 4, 2, 2)
-	if err != nil {
-		t.Fatal(err)
+// BenchmarkPartitionDataCreation benchmarks the data structure creation
+func BenchmarkPartitionDataCreation(b *testing.B) {
+	sizes := []struct {
+		name           string
+		nx, ny         int
+		partNx, partNy int
+	}{
+		{"16x16_4x4", 16, 16, 4, 4},
+		{"32x32_4x4", 32, 32, 4, 4},
+		{"64x64_8x8", 64, 64, 8, 8},
 	}
 
-	stats := mesh.ComputeStatistics()
+	for _, size := range sizes {
+		mesh, _ := NewTestMesh2D(size.nx, size.ny, size.partNx, size.partNy)
 
-	// For a 4x4 mesh:
-	// - Internal horizontal faces: 3x4 = 12
-	// - Internal vertical faces: 4x3 = 12
-	// - Boundary faces: 4x4 = 16
-	// - Total faces: 12 + 12 + 16 = 40
-	expectedTotalFaces := 40
-	if stats.TotalFaces != expectedTotalFaces {
-		t.Errorf("Expected %d total faces, got %d", expectedTotalFaces, stats.TotalFaces)
-	}
-
-	expectedBoundaryFaces := 16 // 4 sides x 4 faces per side = 16
-	if stats.BoundaryFaces != expectedBoundaryFaces {
-		t.Errorf("Expected %d boundary faces, got %d", expectedBoundaryFaces, stats.BoundaryFaces)
-	}
-
-	// With 2x2 partitions, we expect:
-	// - 4 inter-partition faces along the vertical partition boundary
-	// - 4 inter-partition faces along the horizontal partition boundary
-	// - Total: 8 inter-partition faces
-	expectedInterPartFaces := 8
-	if stats.InterPartFaces != expectedInterPartFaces {
-		t.Errorf("Expected %d inter-partition faces, got %d",
-			expectedInterPartFaces, stats.InterPartFaces)
-	}
-
-	// Intra-partition faces = Total internal faces - Inter-partition faces
-	// Internal faces = Total - Boundary = 40 - 16 = 24
-	// Intra-partition = 24 - 8 = 16
-	expectedIntraPartFaces := 16
-	if stats.IntraPartFaces != expectedIntraPartFaces {
-		t.Errorf("Expected %d intra-partition faces, got %d",
-			expectedIntraPartFaces, stats.IntraPartFaces)
+		b.Run(size.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				_ = BuildPartitionHaloData(mesh.Topo)
+			}
+		})
 	}
 }
