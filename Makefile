@@ -12,13 +12,8 @@ generate:
 	go generate ./...
 
 occa-install:
-	git clone https://github.com/libocca/occa.git
-	cd occa
-	# Create build directory
-	mkdir build && cd build
-	# Configure with desired backends
-	# For CPU-only:
-	cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local
+	if [ ! -d occa ]; then git clone https://github.com/libocca/occa.git; fi
+	cd occa && mkdir -p build && cd build && cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local && make -j8 && sudo make install
 	# For NVIDIA GPU support (requires CUDA toolkit):
 	#cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DOCCA_ENABLE_CUDA=ON
 	# For AMD GPU support (requires ROCm):
@@ -32,9 +27,6 @@ occa-install:
     #     -DOCCA_ENABLE_CUDA=ON \
     #     -DOCCA_ENABLE_OPENMP=ON \
     #     -DOCCA_ENABLE_OPENCL=ON
-	# Build and install
-	make -j8
-	sudo make install
 	# Update library cache
 	sudo ldconfig
 	# Verify installation and check available backends
