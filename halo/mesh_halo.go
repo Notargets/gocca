@@ -87,7 +87,22 @@ func BuildPartitionHaloData(topo MeshTopology) []PartitionHaloData {
 		}
 	}
 
-	// First pass: identify elements per partition and all exchanges
+	// First pass: build element lists per partition
+	for elem := 0; elem < topo.K; elem++ {
+		p := topo.EtoP[elem]
+		partData[p].LocalElementIDs = append(partData[p].LocalElementIDs, int32(elem))
+	}
+
+	// Create global->local element mappings for each partition
+	globalToLocal := make([]map[int32]int32, topo.Npart)
+	for p := 0; p < topo.Npart; p++ {
+		globalToLocal[p] = make(map[int32]int32)
+		for i, globalID := range partData[p].LocalElementIDs {
+			globalToLocal[p][globalID] = int32(i)
+		}
+	}
+
+	// Temporary storage for face exchanges
 	tempLocalSend := make([][]FaceInfo, topo.Npart)
 	tempLocalRecv := make([][]FaceInfo, topo.Npart)
 	tempRemoteRecv := make([]map[int][]FaceInfo, topo.Npart)
@@ -96,76 +111,74 @@ func BuildPartitionHaloData(topo MeshTopology) []PartitionHaloData {
 		tempRemoteRecv[p] = make(map[int][]FaceInfo)
 	}
 
-	// Build element lists
+	// Second pass: identify all face exchanges
 	for elem := 0; elem < topo.K; elem++ {
-		p := topo.EtoP[elem]
-		partData[p].LocalElementIDs = append(partData[p].LocalElementIDs, int32(elem))
-	}
-
-	// Identify all face exchanges
-	for elem := 0; elem < topo.K; elem++ {
-		srcPart := topo.EtoP[elem]
+		elemPart := topo.EtoP[elem]
 
 		for face := 0; face < topo.Nface; face++ {
 			neighbor := topo.EtoE[elem][face]
 			if neighbor < 0 || neighbor >= topo.K {
-				continue
+				continue // boundary face
 			}
 
-			dstPart := topo.EtoP[neighbor]
+			neighborPart := topo.EtoP[neighbor]
 			neighborFace := topo.EtoF[elem][face]
 
-			if srcPart == dstPart {
-				// Local exchange
-				tempLocalSend[srcPart] = append(tempLocalSend[srcPart],
+			// Verify the connection is bidirectional
+			if topo.EtoE[neighbor][neighborFace] != elem {
+				panic(fmt.Sprintf("Mesh connectivity error: elem %d face %d -> neighbor %d face %d, but neighbor doesn't point back",
+					elem, face, neighbor, neighborFace))
+			}
+
+			if elemPart == neighborPart {
+				// LOCAL EXCHANGE: both elements in same partition
+				// Element 'elem' sends its face data to fill neighbor's face slot
+				tempLocalSend[elemPart] = append(tempLocalSend[elemPart],
 					FaceInfo{elem, face})
-				tempLocalRecv[srcPart] = append(tempLocalRecv[srcPart],
+				tempLocalRecv[elemPart] = append(tempLocalRecv[elemPart],
 					FaceInfo{neighbor, neighborFace})
 			} else {
-				// Remote exchange - avoid duplicates
-				if elem < neighbor {
-					// This partition sends
-					partData[srcPart].SendFaces[dstPart] = append(
-						partData[srcPart].SendFaces[dstPart],
-						FaceInfo{elem, face})
-					// That partition receives
-					tempRemoteRecv[dstPart][srcPart] = append(
-						tempRemoteRecv[dstPart][srcPart],
-						FaceInfo{neighbor, neighborFace})
-				}
+				// REMOTE EXCHANGE: elements in different partitions
+				// Partition elemPart sends face data of elem to neighborPart
+				partData[elemPart].SendFaces[neighborPart] = append(
+					partData[elemPart].SendFaces[neighborPart],
+					FaceInfo{elem, face})
+
+				// Partition neighborPart receives and places it in neighbor's face slot
+				tempRemoteRecv[neighborPart][elemPart] = append(
+					tempRemoteRecv[neighborPart][elemPart],
+					FaceInfo{neighbor, neighborFace})
 			}
 		}
 	}
 
-	// Second pass: build kernel data structures for each partition
+	// Third pass: build kernel data structures for each partition
 	for p := 0; p < topo.Npart; p++ {
 		pd := &partData[p]
 		pd.NumLocalElements = len(pd.LocalElementIDs)
 
-		// Convert local exchanges
+		// Convert local exchanges using partition-specific mapping
 		pd.NumLocalFaces = int32(len(tempLocalSend[p]))
 		pd.LocalSendElements = make([]int32, pd.NumLocalFaces)
 		pd.LocalSendFaces = make([]int32, pd.NumLocalFaces)
 		pd.LocalRecvElements = make([]int32, pd.NumLocalFaces)
 		pd.LocalRecvFaces = make([]int32, pd.NumLocalFaces)
 
-		// Create global->local element mapping
-		globalToLocal := make(map[int32]int32)
-		for i, globalID := range pd.LocalElementIDs {
-			globalToLocal[globalID] = int32(i)
-		}
-
 		// Fill local exchange arrays with local indices
 		for i, send := range tempLocalSend[p] {
 			recv := tempLocalRecv[p][i]
-			pd.LocalSendElements[i] = globalToLocal[int32(send.ElementID)]
+
+			localSendElem := globalToLocal[p][int32(send.ElementID)]
+			localRecvElem := globalToLocal[p][int32(recv.ElementID)]
+
+			pd.LocalSendElements[i] = localSendElem
 			pd.LocalSendFaces[i] = int32(send.FaceID)
-			pd.LocalRecvElements[i] = globalToLocal[int32(recv.ElementID)]
+			pd.LocalRecvElements[i] = localRecvElem
 			pd.LocalRecvFaces[i] = int32(recv.FaceID)
 		}
 
 		// Build receive index for remote faces
-		buildReceiveIndex(pd, tempRemoteRecv[p], globalToLocal)
+		buildReceiveIndex(pd, tempRemoteRecv[p], globalToLocal[p])
 	}
 
 	return partData
@@ -225,76 +238,6 @@ func GetKernelBufferInfo(pd *PartitionHaloData, topo MeshTopology) KernelBufferI
 		Np:               int32(topo.Np),
 		Nfp:              int32(topo.Nfp),
 	}
-}
-
-// GetHaloExchangeKernels returns kernels that use the partition data
-func GetHaloExchangeKernels(cfg Config) string {
-	return fmt.Sprintf(`
-// Kernel for local face exchange within partition
-@kernel void partitionLocalExchange(const int numFaces,
-                                   const int Np,
-                                   const int Nfp,
-                                   @restrict const int *sendElements,
-                                   @restrict const int *sendFaces,
-                                   @restrict const int *recvElements,
-                                   @restrict const int *recvFaces,
-                                   @restrict const int *fmask,
-                                   @restrict const %s *Q,
-                                   @restrict %s *Qlocal) {
-    for (int i = 0; i < numFaces; ++i; @outer) {
-        for (int fp = 0; fp < Nfp; ++fp; @inner) {
-            const int srcElem = sendElements[i];
-            const int srcFace = sendFaces[i];
-            const int dstElem = recvElements[i];
-            const int dstFace = recvFaces[i];
-            
-            const int srcPoint = fmask[srcFace * Nfp + fp];
-            const int dstPoint = fmask[dstFace * Nfp + fp];
-            
-            Qlocal[dstElem * Np + dstPoint] = Q[srcElem * Np + srcPoint];
-        }
-    }
-}
-
-// Kernel to scatter received remote faces to local elements
-@kernel void partitionScatterRemote(const int numFaces,
-                                   const int Np,
-                                   const int Nfp,
-                                   @restrict const int *recvElements,
-                                   @restrict const int *recvFaces,
-                                   @restrict const int *fmask,
-                                   @restrict const %s *recvBuffer,
-                                   @restrict %s *Qremote) {
-    for (int i = 0; i < numFaces; ++i; @outer) {
-        for (int fp = 0; fp < Nfp; ++fp; @inner) {
-            const int elem = recvElements[i];
-            const int face = recvFaces[i];
-            const int volPoint = fmask[face * Nfp + fp];
-            
-            Qremote[elem * Np + volPoint] = recvBuffer[i * Nfp + fp];
-        }
-    }
-}
-
-// Kernel to gather faces for sending (not used by receiving partition)
-@kernel void partitionGatherSend(const int numFaces,
-                                const int Np,
-                                const int Nfp,
-                                @restrict const int *sendElements,
-                                @restrict const int *sendFaces,
-                                @restrict const int *fmask,
-                                @restrict const %s *Q,
-                                @restrict %s *sendBuffer) {
-    for (int i = 0; i < numFaces; ++i; @outer) {
-        for (int fp = 0; fp < Nfp; ++fp; @inner) {
-            const int elem = sendElements[i];
-            const int face = sendFaces[i];
-            const int volPoint = fmask[face * Nfp + fp];
-            
-            sendBuffer[i * Nfp + fp] = Q[elem * Np + volPoint];
-        }
-    }
-}`, cfg.DataType, cfg.DataType, cfg.DataType, cfg.DataType, cfg.DataType, cfg.DataType)
 }
 
 // PartitionHaloReport generates a detailed report for verification

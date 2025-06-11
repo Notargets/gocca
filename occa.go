@@ -121,19 +121,19 @@ func (m *OCCAMemory) Free() {
 }
 
 // RunWithArgs runs the kernel with arguments
-func (k *OCCAKernel) RunWithArgs(args ...interface{}) {
-	// For now, let's handle a simple case with int and memory
-	// This is a simplified version - a full implementation would handle all types
-	if len(args) == 2 {
-		if n, ok := args[0].(int); ok {
-			if mem, ok := args[1].(*OCCAMemory); ok {
-				C.runKernelWithArgs(k.kernel, C.int(n), mem.memory)
-				return
-			}
-		}
-	}
-	panic("RunWithArgs: unsupported argument types")
-}
+// func (k *OCCAKernel) RunWithArgs(args ...interface{}) {
+// 	// For now, let's handle a simple case with int and memory
+// 	// This is a simplified version - a full implementation would handle all types
+// 	if len(args) == 2 {
+// 		if n, ok := args[0].(int); ok {
+// 			if mem, ok := args[1].(*OCCAMemory); ok {
+// 				C.runKernelWithArgs(k.kernel, C.int(n), mem.memory)
+// 				return
+// 			}
+// 		}
+// 	}
+// 	panic("RunWithArgs: unsupported argument types")
+// }
 
 // Helper functions for Go slices
 func (d *OCCADevice) MallocFloat32(data []float32) *OCCAMemory {
@@ -141,6 +141,14 @@ func (d *OCCADevice) MallocFloat32(data []float32) *OCCAMemory {
 		return d.Malloc(0, nil)
 	}
 	bytes := int64(len(data) * 4) // float32 is 4 bytes
+	return d.Malloc(bytes, unsafe.Pointer(&data[0]))
+}
+
+func (d *OCCADevice) MallocInt32(data []int32) *OCCAMemory {
+	if len(data) == 0 {
+		return d.Malloc(0, nil)
+	}
+	bytes := int64(len(data) * 4) // int32 is 4 bytes
 	return d.Malloc(bytes, unsafe.Pointer(&data[0]))
 }
 

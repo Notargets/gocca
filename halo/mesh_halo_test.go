@@ -231,12 +231,27 @@ func TestInterPartitionCommunication(t *testing.T) {
 	totalSends := 0
 	totalRecvs := 0
 
+	// Track unique face connections to avoid double counting
+	uniqueFaceConnections := make(map[string]bool)
+
 	for p := 0; p < mesh.Topo.Npart; p++ {
 		pd := &partData[p]
 
 		// Count sends
-		for _, faces := range pd.SendFaces {
+		for destPart, faces := range pd.SendFaces {
 			totalSends += len(faces)
+
+			// Track unique connections (order-independent)
+			for range faces {
+				// Create a unique key for this face connection
+				var key string
+				if p < destPart {
+					key = fmt.Sprintf("%d-%d", p, destPart)
+				} else {
+					key = fmt.Sprintf("%d-%d", destPart, p)
+				}
+				uniqueFaceConnections[key] = true
+			}
 		}
 
 		// Count receives
@@ -248,10 +263,53 @@ func TestInterPartitionCommunication(t *testing.T) {
 		t.Errorf("Total sends (%d) != total receives (%d)", totalSends, totalRecvs)
 	}
 
-	// Should match mesh statistics
-	if totalSends != stats.InterPartFaces {
-		t.Errorf("Total inter-partition faces (%d) != mesh statistics (%d)",
-			totalSends, stats.InterPartFaces)
+	// Total sends should be 2x the number of unique inter-partition faces
+	// (since each face generates a bidirectional exchange)
+	expectedTotalSends := stats.InterPartFaces * 2
+	if totalSends != expectedTotalSends {
+		t.Errorf("Total sends (%d) != 2 * inter-partition faces (%d)",
+			totalSends, expectedTotalSends)
+	}
+
+	// Alternative: Count unique face connections
+	// This is more complex because we need to track actual face pairs
+	uniqueFaceCount := 0
+	processedFaces := make(map[string]bool)
+
+	// Traverse mesh to count unique inter-partition faces
+	for elem := 0; elem < mesh.Topo.K; elem++ {
+		elemPart := mesh.Topo.EtoP[elem]
+
+		for face := 0; face < mesh.Topo.Nface; face++ {
+			neighbor := mesh.Topo.EtoE[elem][face]
+			if neighbor < 0 || neighbor >= mesh.Topo.K {
+				continue
+			}
+
+			neighborPart := mesh.Topo.EtoP[neighbor]
+
+			// Only count if crossing partition boundary
+			if elemPart != neighborPart {
+				// Create unique key for this face connection
+				var key string
+				if elem < neighbor {
+					key = fmt.Sprintf("E%d-E%d", elem, neighbor)
+				} else {
+					key = fmt.Sprintf("E%d-E%d", neighbor, elem)
+				}
+
+				if !processedFaces[key] {
+					processedFaces[key] = true
+					uniqueFaceCount++
+				}
+			}
+		}
+	}
+
+	// Verify our count matches mesh statistics
+	if uniqueFaceCount != stats.InterPartFaces {
+		t.Errorf("Counted inter-partition faces (%d) != mesh statistics (%d)",
+			uniqueFaceCount, stats.InterPartFaces)
 	}
 }
 
