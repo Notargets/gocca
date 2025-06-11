@@ -75,11 +75,6 @@ func (d *OCCADevice) BuildKernel(source, kernelName string) (*OCCAKernel, error)
 	return &OCCAKernel{kernel: kernel}, nil
 }
 
-// Run executes the kernel without arguments
-func (k *OCCAKernel) Run() {
-	C.occaKernelRunFromArgs(k.kernel)
-}
-
 // Free frees the kernel
 func (k *OCCAKernel) Free() {
 	C.freeKernel(k.kernel)
