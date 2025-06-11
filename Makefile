@@ -3,7 +3,7 @@ gocca:
 	go install -ldflags "-X main.GitVersion=$(git describe --tags --always --dirty)" ./...
 
 test:
-	go test -cover ./...
+	. ~/.bashrc && go test -cover ./...
 
 tidy:
 	go mod tidy
@@ -13,7 +13,7 @@ generate:
 
 occa-install:
 	if [ ! -d occa ]; then git clone https://github.com/libocca/occa.git; fi
-	cd occa && mkdir -p build && cd build && cmake .. -DOCCA_ENABLE_METAL=OFF -DCMAKE_INSTALL_PREFIX=/usr/local && make -j8 && sudo make install
+	cd occa && mkdir -p build && cd build && cmake .. -DCMAKE_INSTALL_RPATH=/usr/local/lib -DCMAKE_INSTALL_RPATH_USE_LINK_PATH=TRUE -DOCCA_ENABLE_METAL=OFF -DCMAKE_INSTALL_PREFIX=/usr/local && make -j8 && sudo make install
 	# For NVIDIA GPU support (requires CUDA toolkit):
 	#cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DOCCA_ENABLE_CUDA=ON
 	# For AMD GPU support (requires ROCm):
