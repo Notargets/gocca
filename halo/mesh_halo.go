@@ -9,7 +9,6 @@ type Config struct {
 	NPartitions  int
 	BufferStride int32
 	DataType     string // "float" or "double"
-	Nfp          int    // Face points per element
 }
 
 // MeshTopology represents the mesh connectivity information
@@ -47,8 +46,8 @@ type HaloExchange struct {
 	LocalRecv []FaceInfo
 }
 
-// BuildSimpleHaloExchange creates a minimal exchange pattern
-func BuildSimpleHaloExchange(topo MeshTopology) []HaloExchange {
+// BuildHaloExchange creates a minimal exchange pattern
+func BuildHaloExchange(topo MeshTopology) []HaloExchange {
 	exchanges := make([]HaloExchange, topo.Npart)
 
 	// Initialize
@@ -99,10 +98,10 @@ func BuildSimpleHaloExchange(topo MeshTopology) []HaloExchange {
 	return exchanges
 }
 
-// GetSimpleHaloKernels returns minimal kernels for halo exchange
-func GetSimpleHaloKernels(cfg Config) string {
+// GetHaloKernels returns minimal kernels for halo exchange
+func GetHaloKernels(cfg Config) string {
 	return fmt.Sprintf(`
-// Simple gather kernel - just pack face data contiguously
+// gather kernel - just pack face data contiguously
 @kernel void simpleGatherFaces(const int nFaces,
                                const int Np,
                                const int Nfp,
@@ -122,7 +121,7 @@ func GetSimpleHaloKernels(cfg Config) string {
     }
 }
 
-// Simple scatter kernel - unpack face data to ghost cells
+// scatter kernel - unpack face data to ghost cells
 @kernel void simpleScatterFaces(const int nFaces,
                                 const int Np,
                                 const int Nfp,
@@ -233,9 +232,9 @@ func ExampleHaloExchangeDriver(partition int, exchange HaloExchange,
 	}
 }
 
-// GenerateSimpleReport creates a summary of the exchange pattern
-func GenerateSimpleReport(exchanges []HaloExchange, topo MeshTopology) string {
-	report := fmt.Sprintf("=== Simple Halo Exchange Report ===\n")
+// GenerateHaloReport creates a summary of the exchange pattern
+func GenerateHaloReport(exchanges []HaloExchange, topo MeshTopology) string {
+	report := fmt.Sprintf("=== Halo Exchange Report ===\n")
 	report += fmt.Sprintf("Mesh: %d elements, %d partitions\n\n", topo.K, topo.Npart)
 
 	totalLocal := 0
