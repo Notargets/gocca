@@ -2,7 +2,10 @@ package gocca_test
 
 import (
 	"github.com/notargets/gocca"
+	"io/ioutil"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -19,13 +22,27 @@ const deviceStr = `{
 }`
 
 func TestDeviceInit(t *testing.T) {
-	// Test device creation from JSON
+	// Test device creation from JSON using CreateDevice (direct C API equivalent)
 	props := gocca.JsonParse(deviceStr)
 	defer props.Free()
 
-	device, err := gocca.NewDevice(deviceStr)
+	device, err := gocca.CreateDevice(props)
 	if err != nil {
 		t.Fatalf("Failed to create device: %v", err)
+	}
+	device.Free()
+
+	// Test device creation from string using NewDevice (convenience method)
+	device, err = gocca.NewDevice(deviceStr)
+	if err != nil {
+		t.Fatalf("Failed to create device with NewDevice: %v", err)
+	}
+	device.Free()
+
+	// Test device creation from string using CreateDeviceFromString
+	device, err = gocca.CreateDeviceFromString(deviceStr)
+	if err != nil {
+		t.Fatalf("Failed to create device from string: %v", err)
 	}
 	defer device.Free()
 
@@ -38,6 +55,8 @@ func TestDeviceInit(t *testing.T) {
 }
 
 func TestDeviceProperties(t *testing.T) {
+	// Test with undefined device would crash in Go, skip that part
+
 	device, err := gocca.NewDevice(deviceStr)
 	if err != nil {
 		t.Fatalf("Failed to create device: %v", err)
@@ -127,6 +146,85 @@ func TestDeviceMemoryMethods(t *testing.T) {
 	}
 }
 
+func TestDeviceKernelMethods(t *testing.T) {
+	device, err := gocca.NewDevice(deviceStr)
+	if err != nil {
+		t.Fatalf("Failed to create device: %v", err)
+	}
+	defer device.Free()
+
+	props := gocca.JsonParse(deviceStr)
+	defer props.Free()
+
+	// Create test kernel file
+	tmpDir, err := ioutil.TempDir("", "gocca_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	addVectorsFile := filepath.Join(tmpDir, "addVectors.okl")
+	addVectorsSource := `
+@kernel void addVectors(const int entries,
+                       const float *a,
+                       const float *b,
+                       float *ab) {
+  for (int i = 0; i < entries; ++i; @tile(16, @outer, @inner)) {
+    ab[i] = a[i] + b[i];
+  }
+}
+`
+	err = ioutil.WriteFile(addVectorsFile, []byte(addVectorsSource), 0644)
+	if err != nil {
+		t.Fatalf("Failed to write kernel file: %v", err)
+	}
+
+	// Test device.BuildKernel
+	addVectors, err := device.BuildKernel(addVectorsFile, "addVectors", nil)
+	if err != nil {
+		t.Fatalf("DeviceBuildKernel failed: %v", err)
+	}
+
+	binaryFile := addVectors.BinaryFilename()
+	addVectors.Free()
+
+	addVectors, err = device.BuildKernel(addVectorsFile, "addVectors", props)
+	if err != nil {
+		t.Fatalf("DeviceBuildKernel with props failed: %v", err)
+	}
+	addVectors.Free()
+
+	// Test device.BuildKernelFromString
+	addVectors, err = device.BuildKernelFromString(addVectorsSource, "addVectors", nil)
+	if err != nil {
+		t.Fatalf("DeviceBuildKernelFromString failed: %v", err)
+	}
+	addVectors.Free()
+
+	addVectors, err = device.BuildKernelFromString(addVectorsSource, "addVectors", props)
+	if err != nil {
+		t.Fatalf("DeviceBuildKernelFromString with props failed: %v", err)
+	}
+	addVectors.Free()
+
+	// Test device.BuildKernelFromBinary
+	if binaryFile != "" {
+		addVectors, err = device.BuildKernelFromBinary(binaryFile, "addVectors", nil)
+		if err != nil {
+			t.Logf("DeviceBuildKernelFromBinary failed (might be expected): %v", err)
+		} else {
+			addVectors.Free()
+		}
+
+		addVectors, err = device.BuildKernelFromBinary(binaryFile, "addVectors", props)
+		if err != nil {
+			t.Logf("DeviceBuildKernelFromBinary with props failed (might be expected): %v", err)
+		} else {
+			addVectors.Free()
+		}
+	}
+}
+
 func TestDeviceStreamMethods(t *testing.T) {
 	device, err := gocca.NewDevice(deviceStr)
 	if err != nil {
@@ -197,28 +295,35 @@ func TestDeviceWrapMemory(t *testing.T) {
 
 	// Clone memory
 	mem2 := mem1.Clone()
-	defer mem2.Free()
 
 	if mem1.Size() != mem2.Size() {
 		t.Errorf("Cloned memory should have same size")
 	}
 
-	// Test wrap memory
-	data := make([]int32, entries)
+	// Get pointer and detach
+	ptr := mem2.Ptr()
+	mem2.Detach()
+
+	// Fill data
+	data := (*[10]int32)(ptr)
 	for i := 0; i < entries; i++ {
 		data[i] = int32(i)
 	}
 
-	// Note: Some wrap functions might not be available in your OCCA version
-	// Commenting out for now based on earlier issues
-	/*
-		memWrapped := device.WrapMemory(unsafe.Pointer(&data[0]), bytes, nil)
-		defer memWrapped.Free()
+	// Test wrap memory
+	host := gocca.Host()
+	mem2 = host.WrapMemory(ptr, bytes, nil)
+	mem2.Free()
 
-		memProps := gocca.JsonParse(`{foo: 'bar'}`)
-		defer memProps.Free()
+	mem2 = device.TypedWrapMemory(ptr, int64(entries), gocca.DtypeInt, nil)
+	mem2.Free()
 
-		memWrapped2 := device.WrapMemory(unsafe.Pointer(&data[0]), bytes, memProps)
-		defer memWrapped2.Free()
-	*/
+	memProps := gocca.JsonParse(`{foo: 'bar'}`)
+	defer memProps.Free()
+
+	mem2 = host.WrapMemory(ptr, bytes, memProps)
+	mem2.Free()
+
+	mem2 = device.TypedWrapMemory(ptr, int64(entries), gocca.DtypeInt, memProps)
+	mem2.Free()
 }

@@ -63,7 +63,24 @@ type OCCADtype struct {
 
 // Device creation functions
 
-// NewDevice creates a new OCCA device with the given properties
+// CreateDevice creates a new OCCA device from JSON properties (direct C API equivalent)
+func CreateDevice(props *OCCAJson) (*OCCADevice, error) {
+	var propsArg C.occaJson
+	if props != nil {
+		propsArg = props.json
+	} else {
+		propsArg = C.occaDefault
+	}
+
+	device := C.occaCreateDevice(propsArg)
+	if !C.occaDeviceIsInitialized(device) {
+		return nil, errors.New("failed to initialize device")
+	}
+
+	return &OCCADevice{device: device}, nil
+}
+
+// NewDevice creates a new OCCA device with the given properties (string convenience method)
 func NewDevice(deviceInfo string) (*OCCADevice, error) {
 	cDeviceInfo := C.CString(deviceInfo)
 	defer C.free(unsafe.Pointer(cDeviceInfo))
