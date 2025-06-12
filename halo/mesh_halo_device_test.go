@@ -13,6 +13,7 @@ func setupTestDevice() *gocca.OCCADevice {
 	// You might want to make this configurable via environment variables
 	// or test flags
 	device, err := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
+	//device, err := gocca.NewDevice(`{"mode": "OpenCL", "device_id": 0, "platform_id": 0}`)
 	if err != nil {
 		// Fallback to Serial mode if CUDA not available
 		device, err = gocca.NewDevice(`{"mode": "Serial"}`)
