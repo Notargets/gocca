@@ -172,6 +172,54 @@ func (m *OCCAMemory) CopyToInt64(data []int64) {
 	m.CopyTo(unsafe.Pointer(&data[0]), bytes)
 }
 
+// Memory copy functions
+
+// CopyMemToMem copies memory from one device memory to another
+func CopyMemToMem(dest, src *OCCAMemory, bytes int64, destOffset, srcOffset int64, props *OCCAJson) {
+	var propsArg C.occaJson
+	if props != nil {
+		propsArg = props.json
+	} else {
+		propsArg = C.occaDefault
+	}
+
+	C.occaCopyMemToMem(dest.memory, src.memory,
+		C.occaUDim_t(bytes),
+		C.occaUDim_t(destOffset),
+		C.occaUDim_t(srcOffset),
+		propsArg)
+}
+
+// CopyPtrToMem copies from host pointer to device memory
+func CopyPtrToMem(dest *OCCAMemory, src unsafe.Pointer, bytes int64, offset int64, props *OCCAJson) {
+	var propsArg C.occaJson
+	if props != nil {
+		propsArg = props.json
+	} else {
+		propsArg = C.occaDefault
+	}
+
+	C.occaCopyPtrToMem(dest.memory, src,
+		C.occaUDim_t(bytes),
+		C.occaUDim_t(offset),
+		propsArg)
+}
+
+// CopyMemToPtr copies from device memory to host pointer
+func CopyMemToPtr(dest unsafe.Pointer, src *OCCAMemory, bytes int64, offset int64, props *OCCAJson) {
+	var propsArg C.occaJson
+	if props != nil {
+		propsArg = props.json
+	} else {
+		propsArg = C.occaDefault
+	}
+
+	C.occaCopyMemToPtr(dest, src.memory,
+		C.occaUDim_t(bytes),
+		C.occaUDim_t(offset),
+		propsArg)
+}
+
 // CopyFromFloat32 copies float32 slice to device memory
 func (m *OCCAMemory) CopyFromFloat32(data []float32) {
 	if len(data) == 0 {

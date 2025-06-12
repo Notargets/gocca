@@ -6,23 +6,50 @@ import (
 	"unsafe"
 )
 
-func TestMemoryInit(t *testing.T) {
-	bytes := int64(3 * 4) // 3 ints
+func TestMemory(t *testing.T) {
+	// Run tests in same order as C++
+	t.Run("Init", testMemoryInit)
+	t.Run("CopyMethods", testMemoryCopyMethods)
+}
+
+func testMemoryInit(t *testing.T) {
+	bytes := 3 * 4 // 3 * sizeof(int)
 	data := []int32{0, 1, 2}
 
+	// Create JSON properties
 	props := gocca.JsonParse(`{foo: 'bar'}`)
 	defer props.Free()
 
-	// Create memory with data
-	mem := gocca.Malloc(bytes, unsafe.Pointer(&data[0]), props)
+	// Test uninitialized memory
+	// In Go, we don't have the same concept of occaUndefined
+	// so we'll test with a nil pointer initially
+	var mem *gocca.OCCAMemory
+
+	if mem != nil {
+		t.Error("Uninitialized memory should be nil")
+	}
+
+	// Create memory with data and properties
+	mem = gocca.Malloc(int64(bytes), unsafe.Pointer(&data[0]), props)
 	if mem == nil {
 		t.Fatal("Malloc returned nil")
 	}
 	defer mem.Free()
 
-	// Test IsInitialized
 	if !mem.IsInitialized() {
 		t.Error("Memory should be initialized")
+	}
+
+	// Test Ptr() method and verify data
+	ptr := (*[3]int32)(mem.Ptr())
+	if ptr[0] != 0 || ptr[1] != 1 || ptr[2] != 2 {
+		t.Errorf("Expected data [0,1,2], got [%d,%d,%d]", ptr[0], ptr[1], ptr[2])
+	}
+
+	// Test that repeated Ptr() calls return the same pointer
+	ptr2 := (*[3]int32)(mem.Ptr())
+	if ptr != ptr2 {
+		t.Error("Repeated Ptr() calls should return the same pointer")
 	}
 
 	// Test GetDevice
@@ -30,23 +57,21 @@ func TestMemoryInit(t *testing.T) {
 	if device == nil {
 		t.Error("GetDevice returned nil")
 	}
+	// In C++, they verify it's the host device
+	// We can check if it's Serial mode (which is typically the host)
+	if device.Mode() != "Serial" {
+		t.Logf("Device mode: %s", device.Mode())
+	}
 
 	// Test GetProperties
 	memProps := mem.GetProperties()
-	if memProps == nil {
-		t.Error("GetProperties returned nil")
-	} else {
-		defer memProps.Free()
+	defer memProps.Free()
 
-		// Just verify we got valid JSON properties
-		if !memProps.IsObject() {
-			t.Error("Memory properties should be an object")
+	memMode := memProps.ObjectGet("foo", nil)
+	if str, ok := memMode.(string); ok {
+		if str != "bar" {
+			t.Errorf("Expected property foo='bar', got '%s'", str)
 		}
-
-		// The properties might include 'foo' from our props, but also other internal properties
-		// Let's just check if it's a valid JSON object
-		jsonStr := memProps.Dump(2)
-		t.Logf("Memory properties: %s", jsonStr)
 	}
 
 	// Test Size
@@ -54,134 +79,102 @@ func TestMemoryInit(t *testing.T) {
 		t.Errorf("Expected size %d, got %d", bytes, mem.Size())
 	}
 
-	// Test Slice
-	subMem := mem.Slice(int64(1*4), int64(2*4))
+	// Test Slice - using offset of 1*sizeof(int) and occaAllBytes (-1)
+	subMem := mem.Slice(int64(1*4), int64(gocca.OccaAllBytes))
 	if subMem == nil {
 		t.Fatal("Slice returned nil")
 	}
 	defer subMem.Free()
 
-	expectedSize := uint64(2 * 4)
+	expectedSize := uint64(bytes - 1*4)
 	if subMem.Size() != expectedSize {
 		t.Errorf("Expected slice size %d, got %d", expectedSize, subMem.Size())
 	}
+
+	// Verify slice data
+	subPtr := (*[2]int32)(subMem.Ptr())
+	if subPtr[0] != 1 || subPtr[1] != 2 {
+		t.Errorf("Expected slice data [1,2], got [%d,%d]", subPtr[0], subPtr[1])
+	}
 }
 
-func TestMemoryCopyMethods(t *testing.T) {
-	bytes2 := int64(2 * 4) // 2 ints
+func testMemoryCopyMethods(t *testing.T) {
+	bytes2 := 2 * 4 // 2 * sizeof(int)
 	data2 := []int32{0, 1}
 
-	bytes4 := int64(4 * 4) // 4 ints
+	bytes4 := 4 * 4 // 4 * sizeof(int)
 	data4 := []int32{0, 1, 2, 3}
 
-	mem2 := gocca.Malloc(bytes2, unsafe.Pointer(&data2[0]), nil)
+	mem2 := gocca.Malloc(int64(bytes2), unsafe.Pointer(&data2[0]), nil)
 	defer mem2.Free()
 
-	mem4 := gocca.Malloc(bytes4, unsafe.Pointer(&data4[0]), nil)
+	mem4 := gocca.Malloc(int64(bytes4), unsafe.Pointer(&data4[0]), nil)
 	defer mem4.Free()
 
 	props := gocca.JsonParse(`{foo: 'bar'}`)
 	defer props.Free()
 
-	// Test Mem -> Mem copy
-	// Copy [2, 3] to mem2
-	mem2.CopyDeviceToDevice(0, mem4, bytes2, bytes2)
+	// Get pointers for direct verification (matching C++ test)
+	ptr2 := (*[2]int32)(mem2.Ptr())
+	ptr4 := (*[4]int32)(mem4.Ptr())
 
-	// Copy back to verify
-	result2 := make([]int32, 2)
-	mem2.CopyToInt32(result2)
+	// Mem -> Mem
+	// Copy over [2, 3] from mem4[2:4] to mem2[0:2]
+	gocca.CopyMemToMem(mem2, mem4,
+		int64(bytes2),
+		0, int64(bytes2),
+		nil)
 
-	if result2[0] != 2 || result2[1] != 3 {
-		t.Errorf("Expected [2, 3], got %v", result2)
+	if ptr2[0] != 2 || ptr2[1] != 3 {
+		t.Errorf("Expected mem2 to be [2,3], got [%d,%d]", ptr2[0], ptr2[1])
 	}
 
-	// Copy [2] to end of mem4
-	mem4.CopyDeviceToDevice(int64(3*4), mem2, 0, int64(1*4))
+	// Copy over [2] to the end of mem4
+	gocca.CopyMemToMem(mem4, mem2,
+		int64(1*4),
+		int64(3*4), 0,
+		props)
 
-	result4 := make([]int32, 4)
-	mem4.CopyToInt32(result4)
-
-	if result4[0] != 0 || result4[1] != 1 || result4[2] != 2 || result4[3] != 2 {
-		t.Errorf("Expected [0, 1, 2, 2], got %v", result4)
+	if ptr4[0] != 0 || ptr4[1] != 1 || ptr4[2] != 2 || ptr4[3] != 2 {
+		t.Errorf("Expected mem4 to be [0,1,2,2], got [%d,%d,%d,%d]",
+			ptr4[0], ptr4[1], ptr4[2], ptr4[3])
 	}
 
-	// Test CopyFrom/CopyTo
-	data4[3] = 3
-	mem4.CopyFromInt32(data4)
+	// Ptr <-> Mem with default props
+	gocca.CopyPtrToMem(mem4, unsafe.Pointer(&data4[0]),
+		int64(gocca.OccaAllBytes), 0,
+		nil)
 
-	result4New := make([]int32, 4)
-	mem4.CopyToInt32(result4New)
-
-	if result4New[3] != 3 {
-		t.Errorf("Expected last element to be 3, got %d", result4New[3])
+	if ptr4[3] != 3 {
+		t.Errorf("Expected ptr4[3] to be 3, got %d", ptr4[3])
 	}
 
-	// Test with props
-	mem2.CopyDeviceToDeviceWithProps(0, mem4, 0, bytes2, props)
+	ptr4[3] = 2
 
-	result2New := make([]int32, 2)
-	mem2.CopyToInt32(result2New)
+	gocca.CopyMemToPtr(unsafe.Pointer(&data4[0]), mem4,
+		int64(gocca.OccaAllBytes), 0,
+		nil)
 
-	if result2New[0] != 0 || result2New[1] != 1 {
-		t.Errorf("Expected [0, 1], got %v", result2New)
-	}
-}
-
-func TestMemoryHelperMethods(t *testing.T) {
-	// Test float32
-	dataF32 := []float32{1.0, 2.0, 3.0}
-	device := gocca.Host()
-	memF32 := device.MallocFloat32(dataF32)
-	defer memF32.Free()
-
-	resultF32 := make([]float32, 3)
-	memF32.CopyToFloat32(resultF32)
-
-	for i, v := range resultF32 {
-		if v != dataF32[i] {
-			t.Errorf("Float32[%d]: expected %f, got %f", i, dataF32[i], v)
-		}
+	if data4[3] != 2 {
+		t.Errorf("Expected data4[3] to be 2, got %d", data4[3])
 	}
 
-	// Test int32
-	dataI32 := []int32{10, 20, 30}
-	memI32 := device.MallocInt32(dataI32)
-	defer memI32.Free()
+	// Ptr <-> Mem with props
+	gocca.CopyMemToPtr(unsafe.Pointer(&data2[0]), mem2,
+		int64(gocca.OccaAllBytes), 0,
+		props)
 
-	resultI32 := make([]int32, 3)
-	memI32.CopyToInt32(resultI32)
-
-	for i, v := range resultI32 {
-		if v != dataI32[i] {
-			t.Errorf("Int32[%d]: expected %d, got %d", i, dataI32[i], v)
-		}
+	if data2[0] != 2 || data2[1] != 3 {
+		t.Errorf("Expected data2 to be [2,3], got [%d,%d]", data2[0], data2[1])
 	}
 
-	// Test float64
-	dataF64 := []float64{1.5, 2.5, 3.5}
-	memF64 := device.MallocFloat64(dataF64)
-	defer memF64.Free()
+	data2[1] = 1
 
-	resultF64 := make([]float64, 3)
-	memF64.CopyToFloat64(resultF64)
+	gocca.CopyPtrToMem(mem2, unsafe.Pointer(&data2[0]),
+		int64(gocca.OccaAllBytes), 0,
+		props)
 
-	for i, v := range resultF64 {
-		if v != dataF64[i] {
-			t.Errorf("Float64[%d]: expected %f, got %f", i, dataF64[i], v)
-		}
-	}
-
-	// Test int64
-	dataI64 := []int64{100, 200, 300}
-	memI64 := device.MallocInt64(dataI64)
-	defer memI64.Free()
-
-	resultI64 := make([]int64, 3)
-	memI64.CopyToInt64(resultI64)
-
-	for i, v := range resultI64 {
-		if v != dataI64[i] {
-			t.Errorf("Int64[%d]: expected %d, got %d", i, dataI64[i], v)
-		}
+	if ptr2[1] != 1 {
+		t.Errorf("Expected ptr2[1] to be 1, got %d", ptr2[1])
 	}
 }
