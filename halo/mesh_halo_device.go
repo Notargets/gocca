@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/notargets/gocca"
 	"sort"
-	"unsafe"
 )
 
 // HaloExchangeContext contains all the resources needed for halo exchange
@@ -249,7 +248,7 @@ func (ctx *HaloExchangeContext) ExecuteHaloExchange() error {
 
 	// Step 3: Device-side copy from send to receive buffers
 	// In a real implementation, this would be MPI communication
-	onDeviceCopy(ctx.PartitionData, ctx.SendBuffers, ctx.RecvBuffers, Nfp)
+	onDeviceCopy(ctx, Nfp)
 
 	// Step 4: Scatter received faces
 	for p, pd := range ctx.PartitionData {
@@ -279,32 +278,15 @@ func (ctx *HaloExchangeContext) ExecuteHaloExchange() error {
 	return nil
 }
 
-// onDeviceCopy simulates MPI by copying between buffers
-// This would be replaced by actual MPI calls in production
-func onDeviceCopy(partData []PartitionHaloData,
-	sendBuffers, recvBuffers []*gocca.OCCAMemory, Nfp int) {
-
-	// [... same implementation as before ...]
+// onDeviceCopy performs efficient device-to-device copies using native backend calls
+func onDeviceCopy(ctx *HaloExchangeContext, Nfp int) error {
 	// For each partition's sends
-	for srcPart, pd := range partData {
-		if sendBuffers[srcPart] == nil {
+	for srcPart, pd := range ctx.PartitionData {
+		if ctx.SendBuffers[srcPart] == nil {
 			continue
 		}
 
-		// Get the full send buffer for this partition
-		totalSendSize := 0
-		for _, f := range pd.SendFaces {
-			totalSendSize += len(f) * Nfp
-		}
-
-		if totalSendSize == 0 {
-			continue
-		}
-
-		fullSend := make([]float32, totalSendSize)
-		sendBuffers[srcPart].CopyToFloat32(fullSend)
-
-		// We need to iterate through destinations in a consistent order
+		// Sort destinations for consistent ordering
 		destParts := make([]int, 0, len(pd.SendFaces))
 		for dest := range pd.SendFaces {
 			destParts = append(destParts, dest)
@@ -314,42 +296,42 @@ func onDeviceCopy(partData []PartitionHaloData,
 		// Track offset within send buffer
 		sendOffset := 0
 
-		// Copy to each destination in order
+		// Copy to each destination
 		for _, destPart := range destParts {
 			faces := pd.SendFaces[destPart]
-			if len(faces) == 0 || recvBuffers[destPart] == nil {
+			if len(faces) == 0 || ctx.RecvBuffers[destPart] == nil {
 				continue
 			}
 
 			// Find receive offset in destination partition
-			destPd := &partData[destPart]
+			destPd := &ctx.PartitionData[destPart]
 			recvOffset, exists := destPd.RecvOffsets[srcPart]
 			if !exists {
 				continue
 			}
 
-			// Copy face data
+			// Calculate copy parameters
 			numValues := len(faces) * Nfp
+			srcOffsetBytes := int64(sendOffset * 4) // float32 = 4 bytes
+			dstOffsetBytes := int64(int(recvOffset) * Nfp * 4)
+			numBytes := int64(numValues * 4)
 
-			// Extract the portion we need from send buffer
-			sendData := fullSend[sendOffset : sendOffset+numValues]
-
-			// Get destination receive buffer
-			recvSize := int(destPd.NumRemoteFaces) * Nfp
-			fullRecv := make([]float32, recvSize)
-			if recvSize > 0 {
-				recvBuffers[destPart].CopyToFloat32(fullRecv)
-			}
-
-			// Place data at correct offset in receive buffer
-			recvStart := int(recvOffset) * Nfp
-			copy(fullRecv[recvStart:recvStart+numValues], sendData)
-
-			// Copy back to device
-			recvBuffers[destPart].CopyFrom(unsafe.Pointer(&fullRecv[0]), int64(recvSize*4))
+			// Use OCCA's native device-to-device copy
+			// This automatically uses the optimal method for the backend:
+			// - CUDA: cudaMemcpy(cudaMemcpyDeviceToDevice)
+			// - OpenCL: clEnqueueCopyBuffer
+			// - OpenMP/Serial: memcpy (host memory)
+			ctx.RecvBuffers[destPart].CopyDeviceToDevice(
+				dstOffsetBytes,
+				ctx.SendBuffers[srcPart],
+				srcOffsetBytes,
+				numBytes,
+			)
 
 			// Update send offset for next destination
 			sendOffset += numValues
 		}
 	}
+
+	return nil
 }
