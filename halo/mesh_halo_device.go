@@ -1,3 +1,4 @@
+// mesh_halo2.go - Production code
 package halo
 
 import (
@@ -7,8 +8,64 @@ import (
 	"unsafe"
 )
 
-// DeviceHaloExchange demonstrates complete on-device halo exchange
-func DeviceHaloExchange(device *gocca.OCCADevice, mesh *TestMesh2D) error {
+// HaloExchangeContext contains all the resources needed for halo exchange
+type HaloExchangeContext struct {
+	Device        *gocca.OCCADevice // Store device reference
+	PartitionData []PartitionHaloData
+	Q             []*gocca.OCCAMemory // Volume data for each partition
+	Qhalo         []*gocca.OCCAMemory // Halo data for each partition
+	SendBuffers   []*gocca.OCCAMemory
+	RecvBuffers   []*gocca.OCCAMemory
+	Fmask         *gocca.OCCAMemory
+	Topology      MeshTopology
+
+	// Kernels
+	gatherKernel        *gocca.OCCAKernel
+	scatterKernel       *gocca.OCCAKernel
+	localExchangeKernel *gocca.OCCAKernel
+}
+
+// Free releases all allocated memory
+func (ctx *HaloExchangeContext) Free() {
+	// Free buffers
+	for _, q := range ctx.Q {
+		if q != nil {
+			q.Free()
+		}
+	}
+	for _, qh := range ctx.Qhalo {
+		if qh != nil {
+			qh.Free()
+		}
+	}
+	for _, sb := range ctx.SendBuffers {
+		if sb != nil {
+			sb.Free()
+		}
+	}
+	for _, rb := range ctx.RecvBuffers {
+		if rb != nil {
+			rb.Free()
+		}
+	}
+	if ctx.Fmask != nil {
+		ctx.Fmask.Free()
+	}
+
+	// Free kernels
+	if ctx.gatherKernel != nil {
+		ctx.gatherKernel.Free()
+	}
+	if ctx.scatterKernel != nil {
+		ctx.scatterKernel.Free()
+	}
+	if ctx.localExchangeKernel != nil {
+		ctx.localExchangeKernel.Free()
+	}
+}
+
+// NewHaloExchangeContext creates and initializes a halo exchange context
+func NewHaloExchangeContext(device *gocca.OCCADevice, mesh *TestMesh2D) (*HaloExchangeContext, error) {
 	// Build partition data
 	partData := BuildPartitionHaloData(mesh.Topo)
 
@@ -18,24 +75,24 @@ func DeviceHaloExchange(device *gocca.OCCADevice, mesh *TestMesh2D) error {
 	// Get ALL kernel source in one step
 	kernelSource := GetHaloKernels(cfg)
 
-	// Build the kernels we need from that single source
+	// Build the kernels
 	gatherKernel, err := device.BuildKernel(kernelSource, "simpleGatherFaces")
 	if err != nil {
-		return fmt.Errorf("failed to build gather kernel: %v", err)
+		return nil, fmt.Errorf("failed to build gather kernel: %v", err)
 	}
-	defer gatherKernel.Free()
 
 	scatterKernel, err := device.BuildKernel(kernelSource, "simpleScatterFaces")
 	if err != nil {
-		return fmt.Errorf("failed to build scatter kernel: %v", err)
+		gatherKernel.Free()
+		return nil, fmt.Errorf("failed to build scatter kernel: %v", err)
 	}
-	defer scatterKernel.Free()
 
 	localExchangeKernel, err := device.BuildKernel(kernelSource, "simpleLocalExchange")
 	if err != nil {
-		return fmt.Errorf("failed to build local exchange kernel: %v", err)
+		gatherKernel.Free()
+		scatterKernel.Free()
+		return nil, fmt.Errorf("failed to build local exchange kernel: %v", err)
 	}
-	defer localExchangeKernel.Free()
 
 	// Get dimensions
 	nPart := mesh.Topo.Npart
@@ -43,23 +100,29 @@ func DeviceHaloExchange(device *gocca.OCCADevice, mesh *TestMesh2D) error {
 	Nfp := mesh.Topo.Nfp
 	Nface := mesh.Topo.Nface
 
-	// Allocate per-partition arrays - each partition has its own Q and Qhalo
-	d_Q := make([]*gocca.OCCAMemory, nPart)
-	d_Qhalo := make([]*gocca.OCCAMemory, nPart)
-	d_sendBuffers := make([]*gocca.OCCAMemory, nPart)
-	d_recvBuffers := make([]*gocca.OCCAMemory, nPart)
+	// Create context
+	ctx := &HaloExchangeContext{
+		Device:              device,
+		PartitionData:       partData,
+		Q:                   make([]*gocca.OCCAMemory, nPart),
+		Qhalo:               make([]*gocca.OCCAMemory, nPart),
+		SendBuffers:         make([]*gocca.OCCAMemory, nPart),
+		RecvBuffers:         make([]*gocca.OCCAMemory, nPart),
+		Topology:            mesh.Topo,
+		gatherKernel:        gatherKernel,
+		scatterKernel:       scatterKernel,
+		localExchangeKernel: localExchangeKernel,
+	}
 
 	// Allocate memory for each partition
 	for p, pd := range partData {
 		// Each partition gets its own Q array (volume storage)
 		partitionSize := pd.NumLocalElements * Np
-		d_Q[p] = device.MallocFloat32(make([]float32, partitionSize))
-		defer d_Q[p].Free()
+		ctx.Q[p] = device.MallocFloat32(make([]float32, partitionSize))
 
 		// Qhalo uses face-contiguous storage: [elements][faces][face_points]
 		haloSize := pd.NumLocalElements * Nface * Nfp
-		d_Qhalo[p] = device.MallocFloat32(make([]float32, haloSize))
-		defer d_Qhalo[p].Free()
+		ctx.Qhalo[p] = device.MallocFloat32(make([]float32, haloSize))
 
 		// Calculate buffer sizes for this partition
 		sendSize := 0
@@ -69,12 +132,10 @@ func DeviceHaloExchange(device *gocca.OCCADevice, mesh *TestMesh2D) error {
 		recvSize := int(pd.NumRemoteFaces) * Nfp
 
 		if sendSize > 0 {
-			d_sendBuffers[p] = device.MallocFloat32(make([]float32, sendSize))
-			defer d_sendBuffers[p].Free()
+			ctx.SendBuffers[p] = device.MallocFloat32(make([]float32, sendSize))
 		}
 		if recvSize > 0 {
-			d_recvBuffers[p] = device.MallocFloat32(make([]float32, recvSize))
-			defer d_recvBuffers[p].Free()
+			ctx.RecvBuffers[p] = device.MallocFloat32(make([]float32, recvSize))
 		}
 	}
 
@@ -85,31 +146,30 @@ func DeviceHaloExchange(device *gocca.OCCADevice, mesh *TestMesh2D) error {
 			flatFmask[f*Nfp+fp] = int32(mesh.Topo.Fmask[f][fp])
 		}
 	}
-	d_fmask := device.MallocInt32(flatFmask)
-	defer d_fmask.Free()
+	ctx.Fmask = device.MallocInt32(flatFmask)
 
-	// Initialize Q with test data for each partition
-	initializeTestDataPerPartition(partData, mesh.Topo, d_Q)
+	return ctx, nil
+}
 
-	// Execute halo exchange sequence
-	// fmt.Println("Executing device halo exchange...")
+// ExecuteHaloExchange performs the halo exchange using the pre-allocated context
+func (ctx *HaloExchangeContext) ExecuteHaloExchange() error {
+	Np := ctx.Topology.Np
+	Nfp := ctx.Topology.Nfp
+	Nface := ctx.Topology.Nface
 
 	// Step 1: Local exchanges within each partition
-	for p, pd := range partData {
+	for p, pd := range ctx.PartitionData {
 		if pd.NumLocalFaces > 0 {
-			// fmt.Printf("Partition %d: executing %d local face exchanges\n", p, pd.NumLocalFaces)
-
-			d_sendElems := device.MallocInt32(pd.LocalSendElements)
-			d_sendFaces := device.MallocInt32(pd.LocalSendFaces)
-			d_recvElems := device.MallocInt32(pd.LocalRecvElements)
-			d_recvFaces := device.MallocInt32(pd.LocalRecvFaces)
+			d_sendElems := ctx.Device.MallocInt32(pd.LocalSendElements)
+			d_sendFaces := ctx.Device.MallocInt32(pd.LocalSendFaces)
+			d_recvElems := ctx.Device.MallocInt32(pd.LocalRecvElements)
+			d_recvFaces := ctx.Device.MallocInt32(pd.LocalRecvFaces)
 			defer d_sendElems.Free()
 			defer d_sendFaces.Free()
 			defer d_recvElems.Free()
 			defer d_recvFaces.Free()
 
-			// Now using partition-specific Q and Qhalo
-			localExchangeKernel.RunWithArgs(
+			err := ctx.localExchangeKernel.RunWithArgs(
 				int(pd.NumLocalFaces),
 				Np,
 				Nfp,
@@ -118,15 +178,18 @@ func DeviceHaloExchange(device *gocca.OCCADevice, mesh *TestMesh2D) error {
 				d_sendFaces,
 				d_recvElems,
 				d_recvFaces,
-				d_fmask,
-				d_Q[p],     // Partition-specific Q
-				d_Qhalo[p], // Partition-specific Qhalo
+				ctx.Fmask,
+				ctx.Q[p],
+				ctx.Qhalo[p],
 			)
+			if err != nil {
+				return fmt.Errorf("failed to run local exchange kernel: %v", err)
+			}
 		}
 	}
 
 	// Step 2: Gather faces for remote exchange
-	for p, pd := range partData {
+	for p, pd := range ctx.PartitionData {
 		// Sort destination partitions for consistent ordering
 		destParts := make([]int, 0, len(pd.SendFaces))
 		for dest := range pd.SendFaces {
@@ -134,7 +197,7 @@ func DeviceHaloExchange(device *gocca.OCCADevice, mesh *TestMesh2D) error {
 		}
 		sort.Ints(destParts)
 
-		// For now, gather all faces into one send buffer sequentially
+		// Gather all faces into one send buffer sequentially
 		allElements := make([]int32, 0)
 		allFaces := make([]int32, 0)
 
@@ -143,9 +206,6 @@ func DeviceHaloExchange(device *gocca.OCCADevice, mesh *TestMesh2D) error {
 			if len(faces) == 0 {
 				continue
 			}
-
-			// fmt.Printf("Partition %d: gathering %d faces to send to partition %d\n",
-			// 	p, len(faces), destPart)
 
 			// Convert global element IDs to local indices
 			for _, face := range faces {
@@ -166,78 +226,65 @@ func DeviceHaloExchange(device *gocca.OCCADevice, mesh *TestMesh2D) error {
 
 		// Gather all faces at once if there are any
 		if len(allElements) > 0 {
-			d_elements := device.MallocInt32(allElements)
-			d_faces := device.MallocInt32(allFaces)
+			d_elements := ctx.Device.MallocInt32(allElements)
+			d_faces := ctx.Device.MallocInt32(allFaces)
 			defer d_elements.Free()
 			defer d_faces.Free()
 
-			gatherKernel.RunWithArgs(
+			err := ctx.gatherKernel.RunWithArgs(
 				len(allElements),
 				Np,
 				Nfp,
 				d_elements,
 				d_faces,
-				d_fmask,
-				d_Q[p],           // Partition-specific Q
-				d_sendBuffers[p], // Partition-specific send buffer
+				ctx.Fmask,
+				ctx.Q[p],
+				ctx.SendBuffers[p],
 			)
+			if err != nil {
+				return fmt.Errorf("failed to run gather kernel: %v", err)
+			}
 		}
 	}
 
 	// Step 3: Device-side copy from send to receive buffers
 	// In a real implementation, this would be MPI communication
-	onDeviceCopy(partData, d_sendBuffers, d_recvBuffers, Nfp)
+	onDeviceCopy(ctx.PartitionData, ctx.SendBuffers, ctx.RecvBuffers, Nfp)
 
 	// Step 4: Scatter received faces
-	for p, pd := range partData {
+	for p, pd := range ctx.PartitionData {
 		if pd.NumRemoteFaces > 0 {
-			// fmt.Printf("Partition %d: scattering %d received faces\n", p, pd.NumRemoteFaces)
-
-			d_recvElements := device.MallocInt32(pd.RecvElementIDs)
-			d_recvFaces := device.MallocInt32(pd.RecvFaceIDs)
+			d_recvElements := ctx.Device.MallocInt32(pd.RecvElementIDs)
+			d_recvFaces := ctx.Device.MallocInt32(pd.RecvFaceIDs)
 			defer d_recvElements.Free()
 			defer d_recvFaces.Free()
 
-			scatterKernel.RunWithArgs(
+			err := ctx.scatterKernel.RunWithArgs(
 				int(pd.NumRemoteFaces),
 				Np,
 				Nfp,
 				Nface,
 				d_recvElements,
 				d_recvFaces,
-				d_fmask,
-				d_recvBuffers[p], // Partition-specific receive buffer
-				d_Qhalo[p],       // Partition-specific Qhalo
+				ctx.Fmask,
+				ctx.RecvBuffers[p],
+				ctx.Qhalo[p],
 			)
+			if err != nil {
+				return fmt.Errorf("failed to run scatter kernel: %v", err)
+			}
 		}
 	}
-
-	// Verify results
-	verifyHaloExchangePerPartition(partData, mesh.Topo, d_Q, d_Qhalo)
 
 	return nil
 }
 
-// initializeTestDataPerPartition fills each partition's Q with test values
-func initializeTestDataPerPartition(partData []PartitionHaloData, topo MeshTopology, d_Q []*gocca.OCCAMemory) {
-	for p, pd := range partData {
-		Q := make([]float32, pd.NumLocalElements*topo.Np)
-
-		for i, globalElem := range pd.LocalElementIDs {
-			for j := 0; j < topo.Np; j++ {
-				idx := i*topo.Np + j
-				Q[idx] = float32(int(globalElem)*100 + j)
-			}
-		}
-
-		d_Q[p].CopyFrom(unsafe.Pointer(&Q[0]), int64(len(Q)*4))
-	}
-}
-
 // onDeviceCopy simulates MPI by copying between buffers
+// This would be replaced by actual MPI calls in production
 func onDeviceCopy(partData []PartitionHaloData,
 	sendBuffers, recvBuffers []*gocca.OCCAMemory, Nfp int) {
 
+	// [... same implementation as before ...]
 	// For each partition's sends
 	for srcPart, pd := range partData {
 		if sendBuffers[srcPart] == nil {
@@ -258,7 +305,6 @@ func onDeviceCopy(partData []PartitionHaloData,
 		sendBuffers[srcPart].CopyToFloat32(fullSend)
 
 		// We need to iterate through destinations in a consistent order
-		// to match how the gather kernel filled the send buffer
 		destParts := make([]int, 0, len(pd.SendFaces))
 		for dest := range pd.SendFaces {
 			destParts = append(destParts, dest)
@@ -279,8 +325,6 @@ func onDeviceCopy(partData []PartitionHaloData,
 			destPd := &partData[destPart]
 			recvOffset, exists := destPd.RecvOffsets[srcPart]
 			if !exists {
-				fmt.Printf("Warning: P%d expects to receive from P%d but no receive offset found\n",
-					destPart, srcPart)
 				continue
 			}
 
@@ -307,81 +351,5 @@ func onDeviceCopy(partData []PartitionHaloData,
 			// Update send offset for next destination
 			sendOffset += numValues
 		}
-	}
-}
-func verifyHaloExchangePerPartition(partData []PartitionHaloData, topo MeshTopology,
-	d_Q, d_Qhalo []*gocca.OCCAMemory) {
-
-	fmt.Println("\nVerifying halo exchange results...")
-
-	success := true
-	totalChecks := 0
-	failedChecks := 0
-
-	for p, pd := range partData {
-		// Get this partition's data
-		Q := make([]float32, pd.NumLocalElements*topo.Np)
-		Qhalo := make([]float32, pd.NumLocalElements*topo.Nface*topo.Nfp) // Face-contiguous
-
-		d_Q[p].CopyToFloat32(Q)
-		d_Qhalo[p].CopyToFloat32(Qhalo)
-
-		// Check local exchanges
-		for i := 0; i < int(pd.NumLocalFaces); i++ {
-			sendElem := pd.LocalSendElements[i]
-			sendFace := pd.LocalSendFaces[i]
-			recvElem := pd.LocalRecvElements[i]
-			recvFace := pd.LocalRecvFaces[i]
-
-			// Check each face point
-			for fp := 0; fp < topo.Nfp; fp++ {
-				sendPoint := topo.Fmask[sendFace][fp]
-				sendIdx := int(sendElem)*topo.Np + sendPoint
-				expectedValue := Q[sendIdx]
-
-				// Face-contiguous indexing for Qhalo
-				recvIdx := int(recvElem)*topo.Nface*topo.Nfp + int(recvFace)*topo.Nfp + fp
-				actualValue := Qhalo[recvIdx]
-
-				totalChecks++
-				if expectedValue != actualValue {
-					if failedChecks < 5 { // Only print first few failures
-						fmt.Printf("  Local exchange failed: P%d elem %d face %d -> elem %d face %d: expected %.1f, got %.1f\n",
-							p, sendElem, sendFace, recvElem, recvFace, expectedValue, actualValue)
-					}
-					failedChecks++
-					success = false
-				}
-			}
-		}
-
-		// Check remote receives
-		for i := 0; i < int(pd.NumRemoteFaces); i++ {
-			recvElem := pd.RecvElementIDs[i]
-			recvFace := pd.RecvFaceIDs[i]
-			srcPart := pd.RecvPartitions[i]
-
-			for fp := 0; fp < topo.Nfp; fp++ {
-				// Face-contiguous indexing for Qhalo
-				recvIdx := int(recvElem)*topo.Nface*topo.Nfp + int(recvFace)*topo.Nfp + fp
-				actualValue := Qhalo[recvIdx]
-
-				totalChecks++
-				if actualValue == 0.0 {
-					if failedChecks < 5 {
-						fmt.Printf("  Remote receive failed: P%d elem %d face %d from P%d: value is zero\n",
-							p, recvElem, recvFace, srcPart)
-					}
-					failedChecks++
-					success = false
-				}
-			}
-		}
-	}
-
-	if success {
-		fmt.Printf("✓ Halo exchange completed successfully (%d checks passed)\n", totalChecks)
-	} else {
-		fmt.Printf("✗ Halo exchange failed: %d/%d checks failed\n", failedChecks, totalChecks)
 	}
 }
