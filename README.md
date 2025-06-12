@@ -34,6 +34,13 @@ host.
 
 ## Installation
 
+Gocca was built to provide the **Occa API Version 2.0.0** on github.
+
+There are two methods in Gocca that provide version information about this 
+wrapper and the installed version of Occa:
+GetOccaVersion(): Interrogates installed version of Occa
+GetGoccaVersion(): Interrogates the built version of Gocca
+
 ### Install OCCA with GPU Support
 
 First, install OCCA with your desired backend support:

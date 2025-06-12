@@ -1,4 +1,4 @@
-package gocca_test
+package gocca_test_test
 
 import (
 	"github.com/notargets/gocca"
