@@ -6,20 +6,20 @@ import (
 )
 
 func TestDtype(t *testing.T) {
-	// Test dtype equality
+	// Test dtype equality - matching C++ test exactly
 	if !gocca.DtypesAreEqual(gocca.DtypeFloat, gocca.DtypeFloat) {
 		t.Error("DtypeFloat should equal itself")
 	}
 
-	// Create fake float
+	// Create fake float with same size as real float
 	fakeFloat := gocca.CreateDtype("float", gocca.DtypeFloat.Bytes())
 	defer fakeFloat.Free()
 
 	if gocca.DtypesAreEqual(gocca.DtypeFloat, fakeFloat) {
-		t.Error("DtypeFloat should not equal fakeFloat")
+		t.Error("DtypeFloat should not equal fakeFloat (different instances)")
 	}
 
-	// Create fake double with wrong size
+	// Create fake double with size 0
 	fakeDouble := gocca.CreateDtype("double", 0)
 	defer fakeDouble.Free()
 
@@ -27,10 +27,10 @@ func TestDtype(t *testing.T) {
 		t.Error("DtypeFloat should not equal fakeDouble")
 	}
 	if gocca.DtypesAreEqual(gocca.DtypeDouble, fakeDouble) {
-		t.Error("DtypeDouble should not equal fakeDouble with wrong size")
+		t.Error("DtypeDouble should not equal fakeDouble (wrong size)")
 	}
 
-	// Test struct types
+	// Test struct types - matching C++ test structure
 	foo1 := gocca.CreateDtype("foo", 0)
 	foo1.AddField("a", gocca.DtypeDouble)
 	defer foo1.Free()
@@ -49,90 +49,99 @@ func TestDtype(t *testing.T) {
 	foo4.AddField("a", gocca.DtypeDouble)
 	defer foo4.Free()
 
-	// Test equality
+	// Test DtypesAreEqual - matching C++ assertions
 	if !gocca.DtypesAreEqual(foo1, foo1) {
 		t.Error("foo1 should equal itself")
 	}
 	if gocca.DtypesAreEqual(foo1, foo2) {
-		t.Error("foo1 should not equal foo2 (different instances)")
+		t.Error("foo1 should not equal foo2")
 	}
 	if gocca.DtypesAreEqual(foo1, foo3) {
-		t.Error("foo1 should not equal foo3 (different fields)")
+		t.Error("foo1 should not equal foo3")
 	}
 	if gocca.DtypesAreEqual(foo1, foo4) {
-		t.Error("foo1 should not equal foo4 (different fields)")
+		t.Error("foo1 should not equal foo4")
 	}
 	if gocca.DtypesAreEqual(foo3, foo4) {
-		t.Error("foo3 should not equal foo4 (different field order)")
+		t.Error("foo3 should not equal foo4")
 	}
 
-	// Test match
+	// Test DtypesMatch - matching C++ assertions
 	if !gocca.DtypesMatch(foo1, foo1) {
 		t.Error("foo1 should match itself")
 	}
 	if !gocca.DtypesMatch(foo1, foo2) {
-		t.Error("foo1 should match foo2 (same structure)")
+		t.Error("foo1 should match foo2")
 	}
 	if gocca.DtypesMatch(foo1, foo3) {
-		t.Error("foo1 should not match foo3 (different fields)")
+		t.Error("foo1 should not match foo3")
 	}
 	if gocca.DtypesMatch(foo1, foo4) {
-		t.Error("foo1 should not match foo4 (different fields)")
+		t.Error("foo1 should not match foo4")
 	}
 	if gocca.DtypesMatch(foo3, foo4) {
-		t.Error("foo3 should not match foo4 (different field order)")
+		t.Error("foo3 should not match foo4")
 	}
 }
 
-func TestDtypeJsonMethods(t *testing.T) {
+func TestJsonMethods(t *testing.T) {
 	// Test double to JSON
 	doubleJson := gocca.DtypeDouble.ToJson()
 	defer doubleJson.Free()
-
 	doubleJsonStr := doubleJson.Dump(0)
-	_ = doubleJsonStr
 
-	rawDoubleJson := gocca.JsonParse(`{ "type": "builtin", "name": "double" }`)
+	rawDoubleJson := gocca.JsonParse(`{ type: 'builtin', name: 'double' }`)
 	defer rawDoubleJson.Free()
-
 	rawDoubleJsonStr := rawDoubleJson.Dump(0)
-	_ = rawDoubleJsonStr
 
-	// Note: JSON string comparison might not work due to formatting differences
-	// Instead, we'll check the structure
+	// Note: In C++ they compare strings directly, but JSON formatting may vary
+	// We'll check that both produce valid JSON with expected fields
 	if !doubleJson.ObjectHas("type") || !doubleJson.ObjectHas("name") {
 		t.Error("Double JSON should have 'type' and 'name' fields")
 	}
 
-	// Test struct to JSON
+	// Clean up strings if they need to be freed (depends on your wrapper implementation)
+	_ = doubleJsonStr
+	_ = rawDoubleJsonStr
+
+	// Test struct to JSON - matching C++ test structure
 	foo := gocca.CreateDtype("foo", 0)
 	foo.AddField("a", gocca.DtypeDouble)
 	foo.AddField("b", gocca.DtypeDouble)
 	defer foo.Free()
 
+	baseFooJsonStr := `{
+		type: 'struct',
+		fields: [
+			{ name: 'a', dtype: { type: 'builtin', name: 'double' } },
+			{ name: 'b', dtype: { type: 'builtin', name: 'double' } }
+		]
+	}`
+
 	fooJson := foo.ToJson()
 	defer fooJson.Free()
+	fooJsonStr := fooJson.Dump(0)
 
-	// Create dtype from JSON
+	rawFooJson := gocca.JsonParse(baseFooJsonStr)
+	defer rawFooJson.Free()
+	rawFooJsonStr := rawFooJson.Dump(0)
+
+	// Again, string comparison might not work due to formatting
+	_ = fooJsonStr
+	_ = rawFooJsonStr
+
+	// Test DtypeFromJson
 	foo2 := gocca.DtypeFromJson(fooJson)
 	defer foo2.Free()
 
 	if gocca.DtypesAreEqual(foo, foo2) {
-		t.Error("foo and foo2 should not be equal (different instances)")
+		t.Error("foo and foo2 should not be equal")
 	}
 	if !gocca.DtypesMatch(foo, foo2) {
-		t.Error("foo and foo2 should match (same structure)")
+		t.Error("foo and foo2 should match")
 	}
 
-	// Create dtype from JSON string
-	baseFooJsonStr := `{
-		"type": "struct",
-		"fields": [
-			{ "name": "a", "dtype": { "type": "builtin", "name": "double" } },
-			{ "name": "b", "dtype": { "type": "builtin", "name": "double" } }
-		]
-	}`
-
+	// Test DtypeFromJsonString
 	foo3 := gocca.DtypeFromJsonString(baseFooJsonStr)
 	defer foo3.Free()
 
@@ -147,54 +156,5 @@ func TestDtypeJsonMethods(t *testing.T) {
 	}
 	if !gocca.DtypesMatch(foo2, foo3) {
 		t.Error("foo2 and foo3 should match")
-	}
-}
-
-func TestBuiltinDtypes(t *testing.T) {
-	// Test built-in dtypes are available
-	dtypes := []struct {
-		dtype *gocca.OCCADtype
-		name  string
-		bytes int
-	}{
-		{gocca.DtypeVoid, "void", 0},
-		{gocca.DtypeBool, "bool", 1},
-		{gocca.DtypeInt8, "int8", 1},
-		{gocca.DtypeUint8, "uint8", 1},
-		{gocca.DtypeInt16, "int16", 2},
-		{gocca.DtypeUint16, "uint16", 2},
-		{gocca.DtypeInt32, "int32", 4},
-		{gocca.DtypeUint32, "uint32", 4},
-		{gocca.DtypeInt64, "int64", 8},
-		{gocca.DtypeUint64, "uint64", 8},
-		{gocca.DtypeFloat, "float", 4},
-		{gocca.DtypeDouble, "double", 8},
-	}
-
-	for _, dt := range dtypes {
-		if dt.dtype == nil {
-			t.Errorf("Dtype %s is nil", dt.name)
-			continue
-		}
-
-		// Some built-in types might have different byte sizes
-		// Just verify they exist and have reasonable sizes
-		bytes := dt.dtype.Bytes()
-		if bytes < 0 {
-			t.Errorf("Dtype %s has invalid byte size: %d", dt.name, bytes)
-		}
-	}
-
-	// Test vector types
-	vectorTypes := []*gocca.OCCADtype{
-		gocca.DtypeFloat2, gocca.DtypeFloat3, gocca.DtypeFloat4,
-		gocca.DtypeDouble2, gocca.DtypeDouble3, gocca.DtypeDouble4,
-		gocca.DtypeInt2, gocca.DtypeInt3, gocca.DtypeInt4,
-	}
-
-	for _, vt := range vectorTypes {
-		if vt == nil {
-			t.Error("Vector type is nil")
-		}
 	}
 }

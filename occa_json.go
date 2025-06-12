@@ -122,8 +122,13 @@ func (j *OCCAJson) ObjectGet(key string, defaultValue interface{}) interface{} {
 	cKey := C.CString(key)
 	defer C.free(unsafe.Pointer(cKey))
 
-	defaultOcca, _ := convertToOCCAType(defaultValue)
-	result := C.occaJsonObjectGet(j.json, cKey, defaultOcca)
+	// Check if key exists first
+	if !j.ObjectHas(key) {
+		return defaultValue
+	}
+
+	// Key exists, so get the actual value (use occaUndefined to get the real value)
+	result := C.occaJsonObjectGet(j.json, cKey, C.occaUndefined)
 	return occaTypeToGo(result)
 }
 

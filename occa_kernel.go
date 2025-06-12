@@ -162,6 +162,10 @@ func (k *OCCAKernel) Run(args ...interface{}) {
 
 // Helper function to convert Go types to OCCA types
 func convertToOCCAType(arg interface{}) (C.occaType, error) {
+	if arg == nil {
+		return C.occaNull, nil
+	}
+
 	switch v := arg.(type) {
 	case bool:
 		return C.occaBool(C.bool(v)), nil
