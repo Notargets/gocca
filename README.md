@@ -4,7 +4,19 @@
 (https://pkg.go.dev/github.com/notargets/gocca)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Go bindings for [OCCA](https://github.com/libocca/occa), a portable and vendor-neutral framework for parallel programming on heterogeneous platforms.
+Go bindings for [OCCA](https://github.com/libocca/occa), a portable and 
+vendor-neutral framework for parallel programming on heterogeneous platforms.
+
+## Introduction
+Occa provides the ability to write code once and run on GPU, Multi-core CPU 
+and HPC cluster supercomputers with high efficiency.
+
+It works by using the host language to build a "driver" that launches 
+kernels written in the Occa meta  language, that looks like C. Occa takes 
+care of compiling the source code built within the host driver and executing 
+it. Occa provides memory transfer between host and kernels to make it easy 
+to integrate high performance parallel kernels that run at the control of the 
+host.
 
 ## Features
 
