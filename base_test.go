@@ -2,7 +2,10 @@ package gocca_test
 
 import (
 	"github.com/notargets/gocca"
+	"io/ioutil"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -61,14 +64,14 @@ func TestDeviceMethods(t *testing.T) {
 	} else {
 		defer props.Free()
 
-		// Debug: print what we got
-		jsonStr := props.Dump(2)
-		t.Logf("Device properties: %s", jsonStr)
-
-		// The properties might be nested or the key might not be at the top level
-		// Let's just verify we got valid JSON properties
-		if !props.IsObject() {
-			t.Error("DeviceProperties should return an object")
+		// Check that the key exists and has the right value
+		if props.ObjectHas("key") {
+			val := props.ObjectGet("key", "")
+			if val != "value" {
+				t.Errorf("Expected key='value', got '%v'", val)
+			}
+		} else {
+			t.Error("DeviceProperties should have 'key' property")
 		}
 	}
 
@@ -104,6 +107,81 @@ func TestMemoryMethods(t *testing.T) {
 		t.Errorf("Expected size %d, got %d", bytes, mem.Size())
 	}
 	mem.Free()
+}
+
+func TestKernelMethods(t *testing.T) {
+	// Create test kernel file
+	tmpDir, err := ioutil.TempDir("", "gocca_test")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	addVectorsFile := filepath.Join(tmpDir, "addVectors.okl")
+	addVectorsSource := `
+@kernel void addVectors(const int entries,
+                       const float *a,
+                       const float *b,
+                       float *ab) {
+  for (int i = 0; i < entries; ++i; @tile(16, @outer, @inner)) {
+    ab[i] = a[i] + b[i];
+  }
+}
+`
+	err = ioutil.WriteFile(addVectorsFile, []byte(addVectorsSource), 0644)
+	if err != nil {
+		t.Fatalf("Failed to write kernel file: %v", err)
+	}
+
+	props := gocca.CreateJson()
+	props.ObjectSet("defines/foo", int32(3))
+	defer props.Free()
+
+	// Test BuildKernel
+	addVectors, err := gocca.BuildKernel(addVectorsFile, "addVectors", nil)
+	if err != nil {
+		t.Fatalf("BuildKernel failed: %v", err)
+	}
+
+	// Get binary filename before freeing
+	binaryFile := addVectors.BinaryFilename()
+	addVectors.Free()
+
+	addVectors, err = gocca.BuildKernel(addVectorsFile, "addVectors", props)
+	if err != nil {
+		t.Fatalf("BuildKernel with props failed: %v", err)
+	}
+	addVectors.Free()
+
+	// Test BuildKernelFromString
+	addVectors, err = gocca.BuildKernelFromString(addVectorsSource, "addVectors", nil)
+	if err != nil {
+		t.Fatalf("BuildKernelFromString failed: %v", err)
+	}
+	addVectors.Free()
+
+	addVectors, err = gocca.BuildKernelFromString(addVectorsSource, "addVectors", props)
+	if err != nil {
+		t.Fatalf("BuildKernelFromString with props failed: %v", err)
+	}
+	addVectors.Free()
+
+	// Test BuildKernelFromBinary
+	if binaryFile != "" {
+		addVectors, err = gocca.BuildKernelFromBinary(binaryFile, "addVectors", nil)
+		if err != nil {
+			t.Logf("BuildKernelFromBinary failed (might be expected): %v", err)
+		} else {
+			addVectors.Free()
+		}
+
+		addVectors, err = gocca.BuildKernelFromBinary(binaryFile, "addVectors", props)
+		if err != nil {
+			t.Logf("BuildKernelFromBinary with props failed (might be expected): %v", err)
+		} else {
+			addVectors.Free()
+		}
+	}
 }
 
 func TestStreamMethods(t *testing.T) {
