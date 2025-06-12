@@ -45,16 +45,29 @@ $ make occa-install
 # You should see a confirmation that occa is installed like this:
 # NOTE: Mac OSX ARM64 is currently not working with OCCA
 $ occa info
-    ========+======================+=========
-     CPU(s) | Processor Name       | -       
-            | Memory               | 4.77 GB 
-            | SIMD Instruction Set | N/A     
-            | SIMD Width           | 32 bits 
-            | L1d Cache Size       |  512 KB 
-            | L1i Cache Size       |  768 KB 
-            | L2 Cache Size        |   64 MB 
-            | L3 Cache Size        | 0 bytes 
-    ========+======================+=========
+    ========+======================+============================================
+     CPU(s) | Processor Name       | AMD Ryzen Threadripper PRO 7965WX 24-Cores 
+            | Memory               | 503.1 GB                                   
+            | Clock Frequency      |
+            | SIMD Instruction Set | SSE2                                       
+            | SIMD Width           | 128 bits                                   
+            | L1d Cache Size       | 768 KB                                     
+            | L1i Cache Size       | 768 KB                                     
+            | L2 Cache Size        |  24 MB                                     
+            | L3 Cache Size        | 128 MB                                     
+    ========+======================+============================================
+     OpenCL | Platform 0           | NVIDIA CUDA                                
+            |----------------------+--------------------------------------------
+            | Device 0             | NVIDIA GeForce RTX 4070 SUPER              
+            | Device Type          | gpu                                        
+            | Compute Cores        | 56                                         
+            | Global Memory        | 11.60 GB                                   
+    ========+======================+============================================
+     CUDA   | Device Name          | NVIDIA GeForce RTX 4070 SUPER              
+            | Device ID            | 0                                          
+            | Arch                 | sm_89                                      
+            | Memory               | 11.60 GB                                   
+    ========+======================+============================================
 ```
 
 Set user environment variables
