@@ -27,111 +27,41 @@ Go bindings for [OCCA](https://github.com/libocca/occa), a portable and vendor-n
 First, install OCCA with your desired backend support:
 
 ```bash
-# Clone OCCA
-git clone https://github.com/libocca/occa.git
-cd occa
-# Create build directory
-mkdir build && cd build
-# Configure with desired backends
-# For CPU-only:
-cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local
-# For NVIDIA GPU support (requires CUDA toolkit):
-cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DOCCA_ENABLE_CUDA=ON
-# For AMD GPU support (requires ROCm):
-cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DOCCA_ENABLE_HIP=ON
-# For OpenCL support:
-cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DOCCA_ENABLE_OPENCL=ON
-# For OpenMP support:
-cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local -DOCCA_ENABLE_OPENMP=ON
-# Or enable multiple backends:
-cmake .. -DCMAKE_INSTALL_PREFIX=/usr/local \
-         -DOCCA_ENABLE_CUDA=ON \
-         -DOCCA_ENABLE_OPENMP=ON \
-         -DOCCA_ENABLE_OPENCL=ON
-# Build and install
-make -j8
-sudo make install
-# Update library cache
-sudo ldconfig
-# Verify installation and check available backends
-occa info
+# You need cmake installed on your system before this:
+# do an "sudo apt update && sudo apt install -y cmake"
+$ make occa-install
+# You should see a confirmation that occa is installed like this:
+# NOTE: Mac OSX ARM64 is currently not working with OCCA
+$ occa info
+    ========+======================+=========
+     CPU(s) | Processor Name       | -       
+            | Memory               | 4.77 GB 
+            | SIMD Instruction Set | N/A     
+            | SIMD Width           | 32 bits 
+            | L1d Cache Size       |  512 KB 
+            | L1i Cache Size       |  768 KB 
+            | L2 Cache Size        |   64 MB 
+            | L3 Cache Size        | 0 bytes 
+    ========+======================+=========
 ```
 
 Set user environment variables
 ```bash
-# Required: Set OCCA installation directory
-export OCCA_DIR=/usr/local
-
-# Optional: Set cache directory (defaults to ~/.occa if not set)
-export OCCA_CACHE_DIR=$HOME/.occa
-
-# Add to your shell configuration for permanent setup
-echo 'export OCCA_DIR=/usr/local' >> ~/.bashrc
-source ~/.bashrc
+# The above install command will place these into your $HOME/.bashrc
+$ export OCCA_DIR=/usr/local
+$ export OCCA_CACHE_DIR=$HOME/.occa
 ```
-
 Then install gocca:
 ```bash
-go get github.com/notargets/gocca
+$ go get github.com/notargets/gocca
 ```
 
 ## Quick Start
 
-```go
-package main
-
-import (
-    "fmt"
-    "log"
-    "github.com/notargets/gocca"
-)
-
-func main() {
-    // Create device
-    device, err := gocca.NewDevice(`{"mode": "Serial"}`)
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer device.Free()
-
-    // Define kernel source
-    kernelSource := `
-    @kernel void computeSquares(const int N,
-                                float *result) {
-        @outer for (int b = 0; b < N; b += 1) {
-            @inner for (int i = b; i < b + 1; ++i) {
-                if (i < N) {
-                    result[i] = i * i;
-                }
-            }
-        }
-    }`
-
-    // Build kernel
-    kernel, err := device.BuildKernel(kernelSource, "computeSquares")
-    if err != nil {
-        log.Fatal(err)
-    }
-    defer kernel.Free()
-
-    // Allocate memory for results
-    N := 10
-    resultMem := device.Malloc(int64(N*4), nil) // 4 bytes per float
-    defer resultMem.Free()
-
-    // Run kernel with arguments
-    kernel.RunWithArgs(N, resultMem)
-
-    // Copy results back to host
-    results := make([]float32, N)
-    resultMem.CopyToFloat32(results)
-    
-    // Print results
-    fmt.Println("Computed squares:")
-    for i, val := range results {
-        fmt.Printf("%d² = %.0f\n", i, val)
-    }
-}
+```bash
+# This will run a halo exchange application to verify functionality
+# Take a look at the code in halo/mesh_halo_device_test.go
+$ make test
 ```
 
 ## Examples
