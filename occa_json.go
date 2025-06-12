@@ -235,6 +235,30 @@ func occaTypeToGo(t C.occaType) interface{} {
 	case OCCA_PTR:
 		// Generic pointer
 		return *(*unsafe.Pointer)(valuePtr)
+	case OCCA_JSON:
+		// When ObjectGet returns a value from the JSON, the entire occaType IS the JSON
+		// We need to check what type of JSON value it represents
+		if C.occaJsonIsBoolean(t) {
+			return bool(C.occaJsonGetBoolean(t))
+		} else if C.occaJsonIsNumber(t) {
+			// For numbers, we need to determine the best Go type
+			// Default to float64 for general compatibility
+			numberType := C.occaJsonGetNumber(t, C.int(OCCA_DOUBLE))
+			return occaTypeToGo(numberType)
+		} else if C.occaJsonIsString(t) {
+			return C.GoString(C.occaJsonGetString(t))
+		} else if C.occaJsonIsArray(t) {
+			// Return as wrapped JSON object for array access
+			return &OCCAJson{json: t}
+		} else if C.occaJsonIsObject(t) {
+			// Return as wrapped JSON object for nested object access
+			return &OCCAJson{json: t}
+		}
+		return nil
+	case OCCA_NULL:
+		return nil
+	case OCCA_UNDEFINED:
+		return nil
 	default:
 		return nil
 	}

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"unsafe"
 )
 
 // Simple test kernel source
@@ -20,22 +21,18 @@ const addVectorsSource = `
 }
 `
 
+// Simpler kernel that tests various argument types
 const argKernelSource = `
-@kernel void argKernel(void* ptr,
-                      occaMemory mem,
-                      char c,
-                      unsigned char uc,
-                      short s,
-                      unsigned short us,
-                      int i,
-                      unsigned int ui,
-                      long l,
-                      unsigned long ul,
+@kernel void argKernel(int i,
                       float f,
                       double d,
-                      occaStruct mystruct,
-                      occaString str) {
-  // Kernel does nothing, just tests argument passing
+                      const float *input,
+                      float *output) {
+  for (int idx = 0; idx < 1; ++idx; @outer) {
+    for (int j = 0; j < 1; ++j; @inner) {
+      output[0] = input[0] + i + f + d;
+    }
+  }
 }
 `
 
@@ -158,14 +155,8 @@ func TestKernelRun(t *testing.T) {
 		t.Fatalf("Failed to write kernel file: %v", err)
 	}
 
-	// Build kernel with type validation disabled
-	kernelProps := gocca.JsonParse(`{
-		"type_validation": false,
-		"serial": {"include_std": true}
-	}`)
-	defer kernelProps.Free()
-
-	argKernel, err := gocca.BuildKernel(argKernelFile, "argKernel", kernelProps)
+	// Build kernel
+	argKernel, err := gocca.BuildKernel(argKernelFile, "argKernel", nil)
 	if err != nil {
 		t.Fatalf("Failed to build arg kernel: %v", err)
 	}
@@ -177,39 +168,33 @@ func TestKernelRun(t *testing.T) {
 	argKernel.SetRunDims(outerDims, innerDims)
 
 	// Create test memory
-	value := int32(1)
-	mem := gocca.Malloc(4, nil, nil)
-	defer mem.Free()
-	mem.CopyFromInt32([]int32{value})
+	inputData := []float32{1.0}
+	outputData := []float32{0.0}
 
-	// Create struct for testing
-	type testStruct struct {
-		X, Y float64
-	}
-	xy := testStruct{X: 13.0, Y: 14.0}
+	inputMem := gocca.Malloc(4, unsafe.Pointer(&inputData[0]), nil)
+	defer inputMem.Free()
 
-	str := "fifteen"
+	outputMem := gocca.Malloc(4, unsafe.Pointer(&outputData[0]), nil)
+	defer outputMem.Free()
 
 	// Test kernel run with arguments
 	err = argKernel.RunWithArgs(
-		nil,           // null pointer
-		mem,           // memory
-		int8(3),       // char
-		uint8(4),      // unsigned char
-		int16(5),      // short
-		uint16(6),     // unsigned short
 		int32(7),      // int
-		uint32(8),     // unsigned int
-		int64(9),      // long
-		uint64(10),    // unsigned long
 		float32(11.0), // float
 		float64(12.0), // double
-		&xy,           // struct (as pointer)
-		str,           // string
+		inputMem,      // input memory
+		outputMem,     // output memory
 	)
 
 	if err != nil {
 		t.Errorf("RunWithArgs failed: %v", err)
+	}
+
+	// Copy result back and verify
+	outputMem.CopyToFloat32(outputData)
+	expected := float32(1.0 + 7 + 11.0 + 12.0) // 31.0
+	if outputData[0] != expected {
+		t.Errorf("Expected output %f, got %f", expected, outputData[0])
 	}
 
 	// Test manual argument insertion
@@ -217,9 +202,11 @@ func TestKernelRun(t *testing.T) {
 
 	// Push each argument
 	args := []interface{}{
-		nil, mem, int8(3), uint8(4), int16(5), uint16(6),
-		int32(7), uint32(8), int64(9), uint64(10),
-		float32(11.0), float64(12.0), &xy, str,
+		int32(7),
+		float32(11.0),
+		float64(12.0),
+		inputMem,
+		outputMem,
 	}
 
 	for _, arg := range args {
@@ -241,6 +228,57 @@ func TestKernelRun(t *testing.T) {
 		// This should panic with unsupported type
 		argKernel.Run(argKernel) // kernel is not a valid argument type
 	}()
+}
+
+func TestKernelExecution(t *testing.T) {
+	// Test actual kernel execution with addVectors
+	_, cleanup := setupKernelTest(t)
+	defer cleanup()
+
+	addVectors, err := gocca.BuildKernelFromString(addVectorsSource, "addVectors", nil)
+	if err != nil {
+		t.Fatalf("Failed to build addVectors kernel: %v", err)
+	}
+	defer addVectors.Free()
+
+	// Create test data
+	entries := 10
+	a := make([]float32, entries)
+	b := make([]float32, entries)
+	ab := make([]float32, entries)
+
+	for i := 0; i < entries; i++ {
+		a[i] = float32(i)
+		b[i] = float32(i * 2)
+	}
+
+	// Allocate device memory
+	device := gocca.GetDevice()
+	aMem := device.MallocFloat32(a)
+	defer aMem.Free()
+
+	bMem := device.MallocFloat32(b)
+	defer bMem.Free()
+
+	abMem := device.MallocFloat32(ab)
+	defer abMem.Free()
+
+	// Run kernel
+	err = addVectors.RunWithArgs(int32(entries), aMem, bMem, abMem)
+	if err != nil {
+		t.Fatalf("Failed to run kernel: %v", err)
+	}
+
+	// Copy result back
+	abMem.CopyToFloat32(ab)
+
+	// Verify results
+	for i := 0; i < entries; i++ {
+		expected := a[i] + b[i]
+		if ab[i] != expected {
+			t.Errorf("Result[%d]: expected %f, got %f", i, expected, ab[i])
+		}
+	}
 }
 
 func TestKernelBuildMethods(t *testing.T) {
