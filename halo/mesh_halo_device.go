@@ -75,24 +75,23 @@ func NewHaloExchangeContext(device *gocca.OCCADevice, mesh *TestMesh2D) (*HaloEx
 	kernelSource := GetHaloKernels(cfg)
 
 	// Build the kernels
-	gatherKernel, err := device.BuildKernel(kernelSource, "simpleGatherFaces")
+	gatherKernel, err := device.BuildKernelFromString(kernelSource, "simpleGatherFaces", nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build gather kernel: %v", err)
 	}
 
-	scatterKernel, err := device.BuildKernel(kernelSource, "simpleScatterFaces")
+	scatterKernel, err := device.BuildKernelFromString(kernelSource, "simpleScatterFaces", nil)
 	if err != nil {
 		gatherKernel.Free()
 		return nil, fmt.Errorf("failed to build scatter kernel: %v", err)
 	}
 
-	localExchangeKernel, err := device.BuildKernel(kernelSource, "simpleLocalExchange")
+	localExchangeKernel, err := device.BuildKernelFromString(kernelSource, "simpleLocalExchange", nil)
 	if err != nil {
 		gatherKernel.Free()
 		scatterKernel.Free()
 		return nil, fmt.Errorf("failed to build local exchange kernel: %v", err)
 	}
-
 	// Get dimensions
 	nPart := mesh.Topo.Npart
 	Np := mesh.Topo.Np

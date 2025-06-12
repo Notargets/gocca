@@ -53,7 +53,8 @@ func runComputation(mode string, deviceID int) error {
     }`
 
 	// Build kernel
-	kernel, err := device.BuildKernel(kernelSource, "computeSquares")
+	kernel, err := device.BuildKernelFromString(kernelSource,
+		"computeSquares", nil)
 	if err != nil {
 		return fmt.Errorf("failed to build kernel on %s: %v", mode, err)
 	}
@@ -64,7 +65,7 @@ func runComputation(mode string, deviceID int) error {
 
 	for _, N := range sizes {
 		// Allocate memory
-		resultMem := device.Malloc(int64(N*4), nil)
+		resultMem := device.Malloc(int64(N*4), nil, nil)
 
 		// Time the kernel execution
 		start := time.Now()

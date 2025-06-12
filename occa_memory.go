@@ -34,14 +34,6 @@ func (dst *OCCAMemory) CopyDeviceToDevice(dstOffset int64, src *OCCAMemory, srcO
 	)
 }
 
-func (m *OCCAMemory) CopyToFloat32(data []float32) {
-	if len(data) == 0 {
-		return
-	}
-	bytes := int64(len(data) * 4)
-	m.CopyTo(unsafe.Pointer(&data[0]), bytes)
-}
-
 // CopyTo copies data from device memory to host memory
 func (m *OCCAMemory) CopyTo(dst unsafe.Pointer, bytes int64) {
 	C.occaCopyMemToPtr(dst, m.memory, C.occaUDim_t(bytes), C.occaUDim_t(0), C.occaDefault)
@@ -50,6 +42,80 @@ func (m *OCCAMemory) CopyTo(dst unsafe.Pointer, bytes int64) {
 // CopyFrom copies data from host memory to device memory
 func (m *OCCAMemory) CopyFrom(src unsafe.Pointer, bytes int64) {
 	C.occaCopyPtrToMem(m.memory, src, C.occaUDim_t(bytes), C.occaUDim_t(0), C.occaDefault)
+}
+
+// Helper methods for Go slices
+
+// CopyToFloat32 copies memory to float32 slice
+func (m *OCCAMemory) CopyToFloat32(data []float32) {
+	if len(data) == 0 {
+		return
+	}
+	bytes := int64(len(data) * 4)
+	m.CopyTo(unsafe.Pointer(&data[0]), bytes)
+}
+
+// CopyToFloat64 copies memory to float64 slice
+func (m *OCCAMemory) CopyToFloat64(data []float64) {
+	if len(data) == 0 {
+		return
+	}
+	bytes := int64(len(data) * 8)
+	m.CopyTo(unsafe.Pointer(&data[0]), bytes)
+}
+
+// CopyToInt32 copies memory to int32 slice
+func (m *OCCAMemory) CopyToInt32(data []int32) {
+	if len(data) == 0 {
+		return
+	}
+	bytes := int64(len(data) * 4)
+	m.CopyTo(unsafe.Pointer(&data[0]), bytes)
+}
+
+// CopyToInt64 copies memory to int64 slice
+func (m *OCCAMemory) CopyToInt64(data []int64) {
+	if len(data) == 0 {
+		return
+	}
+	bytes := int64(len(data) * 8)
+	m.CopyTo(unsafe.Pointer(&data[0]), bytes)
+}
+
+// CopyFromFloat32 copies float32 slice to device memory
+func (m *OCCAMemory) CopyFromFloat32(data []float32) {
+	if len(data) == 0 {
+		return
+	}
+	bytes := int64(len(data) * 4)
+	m.CopyFrom(unsafe.Pointer(&data[0]), bytes)
+}
+
+// CopyFromFloat64 copies float64 slice to device memory
+func (m *OCCAMemory) CopyFromFloat64(data []float64) {
+	if len(data) == 0 {
+		return
+	}
+	bytes := int64(len(data) * 8)
+	m.CopyFrom(unsafe.Pointer(&data[0]), bytes)
+}
+
+// CopyFromInt32 copies int32 slice to device memory
+func (m *OCCAMemory) CopyFromInt32(data []int32) {
+	if len(data) == 0 {
+		return
+	}
+	bytes := int64(len(data) * 4)
+	m.CopyFrom(unsafe.Pointer(&data[0]), bytes)
+}
+
+// CopyFromInt64 copies int64 slice to device memory
+func (m *OCCAMemory) CopyFromInt64(data []int64) {
+	if len(data) == 0 {
+		return
+	}
+	bytes := int64(len(data) * 8)
+	m.CopyFrom(unsafe.Pointer(&data[0]), bytes)
 }
 
 // Free frees the device memory
