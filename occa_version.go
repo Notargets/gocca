@@ -33,18 +33,21 @@ func GetOccaVersion() string {
 // GetGoccaVersion returns the GoCCA wrapper version
 func GetGoccaVersion() string {
 	// Git will substitute $Format:%d$ with something like:
-	// "HEAD -> main, tag: v2.0.0, origin/main"
-	// or just "tag: v2.0.0" if on a tag
+	// " (HEAD, tag: v2.0.0, origin/main, origin/HEAD, main)"
+	// or just " (tag: v2.0.0)" if on a tag
 
 	if GoccaVersionInfo == "$Format:%d$" {
 		// Not substituted (in git repo)
 		return "dev"
 	}
 
+	// Trim any leading/trailing spaces
+	info := strings.TrimSpace(GoccaVersionInfo)
+
 	// Parse out tag if present
-	if len(GoccaVersionInfo) > 0 && GoccaVersionInfo[0] == '(' {
-		// Format is like "(HEAD -> main, tag: v2.0.0)"
-		tags := GoccaVersionInfo[1 : len(GoccaVersionInfo)-1]
+	if strings.HasPrefix(info, "(") && strings.HasSuffix(info, ")") {
+		// Remove parentheses
+		tags := info[1 : len(info)-1]
 		if idx := strings.Index(tags, "tag: "); idx >= 0 {
 			tagStart := idx + 5
 			tagEnd := strings.IndexAny(tags[tagStart:], ",)")
@@ -55,7 +58,7 @@ func GetGoccaVersion() string {
 		}
 	}
 
-	// Fall back to commit hash
+	// Fall back to commit hash if no tag found
 	if GoccaCommitHash != "$Format:%h$" {
 		return GoccaCommitHash
 	}
