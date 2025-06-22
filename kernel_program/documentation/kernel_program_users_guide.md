@@ -32,6 +32,73 @@ Writing efficient parallel kernels typically requires:
 
 KernelProgram eliminates this complexity, letting you focus on your algorithm.
 
+## KernelProgram API Methods
+
+### Core Methods
+
+**NewKernelProgram** - Create a new KernelProgram instance
+```go
+kp := gocca.NewKernelProgram(device, gocca.Config{
+    K:         []int{100, 150, 120},  // Partition sizes
+    FloatType: gocca.Float64,         // or Float32
+    IntType:   gocca.Int64,           // or Int32
+})
+```
+
+**AllocateArrays** - Allocate device memory with automatic offset generation
+```go
+err := kp.AllocateArrays([]gocca.ArraySpec{
+    {Name: "U", Size: totalBytes, Alignment: gocca.CacheLineAlign},
+})
+```
+
+**AddStaticMatrix** - Embed matrix as compile-time constant
+```go
+kp.AddStaticMatrix("Dr", myMatrix)  // myMatrix implements mat.Matrix
+```
+
+**GeneratePreamble** - Generate kernel preamble (called automatically by BuildKernel)
+```go
+preamble := kp.GeneratePreamble()
+```
+
+**BuildKernel** - Compile kernel with generated preamble
+```go
+kernel, err := kp.BuildKernel(kernelSource, "kernelName")
+```
+
+**RunKernel** - Execute kernel with automatic parameter expansion
+```go
+err = kp.RunKernel("kernelName", "array1", "array2", ...)
+```
+
+**GetMemory** - Get device memory handle
+```go
+mem := kp.GetMemory("arrayName")
+```
+
+**GetArrayType** - Get data type of allocated array
+```go
+dtype, err := kp.GetArrayType("arrayName")
+```
+
+**Free** - Release all resources
+```go
+kp.Free()
+```
+
+### Data Transfer Functions
+
+**CopyArrayToHost** - Copy entire array from device
+```go
+data, err := gocca.CopyArrayToHost[float64](kp, "arrayName")
+```
+
+**CopyPartitionToHost** - Copy specific partition
+```go
+partData, err := gocca.CopyPartitionToHost[float64](kp, "arrayName", partitionID)
+```
+
 ## Core Concepts
 
 ### Partitions and Variable K
@@ -189,6 +256,8 @@ KernelProgram generates vectorizable macros for matrix operations:
 
 ### Basic Kernel Structure
 
+Kernels follow OCCA's structure with `@outer` and `@inner` loops:
+
 ```c
 @kernel void myKernel(
     const int_t* K,           // Always first: partition sizes
@@ -197,39 +266,45 @@ KernelProgram generates vectorizable macros for matrix operations:
     real_t* RHS_global,
     const int_t* RHS_offsets
 ) {
-    // Outer loop over partitions
+    // Outer loop over partitions - this is the parallelism
     for (int part = 0; part < NPART; ++part; @outer) {
-        // Inner loop for work within partition
-        for (int work = 0; work < 32; ++work; @inner) {
-            if (work == 0) {  // Single thread does partition work
-                // Get partition data pointers
-                const real_t* U = U_PART(part);
-                real_t* RHS = RHS_PART(part);
-                int k_part = K[part];  // Elements in this partition
-                
-                // Process all elements in partition
-                for (int elem = 0; elem < k_part; ++elem) {
-                    RHS[elem] = 2.0 * U[elem];
-                }
-            }
+        // Get partition data pointers using generated macros
+        const real_t* U = U_PART(part);
+        real_t* RHS = RHS_PART(part);
+        int k_part = K[part];  // Elements in this partition
+        
+        // Inner loop is required by OCCA for all backends
+        // How you use it depends on your algorithm
+        for (int i = 0; i < 32; ++i; @inner) {
+            // Your computation here
         }
     }
 }
 ```
 
+### The Inner Loop Requirement
+
+OCCA requires both `@outer` and `@inner` loops to map correctly to different architectures:
+- **CPU**: Inner loops can become SIMD/vectorized operations
+- **GPU**: Inner loops map to threads within a warp/workgroup
+
+The specific pattern within the inner loop depends on your algorithm and data layout. The compiler and hardware will optimize accordingly.
+
 ### Using Partition Macros
 
-The generated macros make accessing partition data clean:
+The generated macros simplify partition data access:
 
 ```c
-// Instead of manual offset calculation:
-// real_t* data = data_global + data_offsets[part];
+// Generated macro expands to:
+// #define U_PART(part) (U_global + U_offsets[part])
 
-// Simply use:
-real_t* data = data_PART(part);
+const real_t* U = U_PART(part);  // Get partition's U data
+real_t* RHS = RHS_PART(part);     // Get partition's RHS data
 ```
 
 ### Matrix Operations in Kernels
+
+The generated matrix macros are designed for compiler vectorization:
 
 ```c
 @kernel void applyDifferentiation(
@@ -240,15 +315,12 @@ real_t* data = data_PART(part);
     const int_t* DU_offsets
 ) {
     for (int part = 0; part < NPART; ++part; @outer) {
-        for (int i = 0; i < 32; ++i; @inner) {
-            if (i == 0) {
-                const real_t* U = U_PART(part);
-                real_t* DU = DU_PART(part);
-                
-                // Apply differentiation matrix to all elements
-                MATMUL_Dr(U, DU, K[part], NP);
-            }
-        }
+        const real_t* U = U_PART(part);
+        real_t* DU = DU_PART(part);
+        
+        // The macro handles all elements in the partition
+        // Compiler will vectorize the loops inside
+        MATMUL_Dr(U, DU, K[part], NP);
     }
 }
 ```
@@ -332,7 +404,7 @@ intData, err := gocca.CopyArrayToHost[int32](kp, "U")  // Returns error
 
 ### 1. Memory Alignment
 
-Always align large arrays for better performance:
+Align large arrays for better performance:
 ```go
 {
     Name:      "largeArray",
@@ -343,61 +415,27 @@ Always align large arrays for better performance:
 }
 ```
 
-### 2. Kernel Design Patterns
+### 2. Partition Balance
 
-**DO**: Process entire partitions in single thread
-```c
-for (int part = 0; part < NPART; ++part; @outer) {
-    for (int i = 0; i < 32; ++i; @inner) {
-        if (i == 0) {  // Single thread processes partition
-            // Process all elements in partition
-        }
-    }
-}
-```
-
-**DON'T**: Try to parallelize within partitions
-```c
-// Wrong - violates partition-parallel model
-for (int part = 0; part < NPART; ++part; @outer) {
-    for (int elem = 0; elem < K[part]; ++elem; @inner) {
-        // This won't work correctly
-    }
-}
-```
+Keep partition sizes (K values) relatively balanced for better load distribution across parallel execution units.
 
 ### 3. Static Data Usage
 
-Embed frequently-used matrices:
+Embed frequently-used matrices for optimal performance:
 ```go
-// Good - compiled into kernel
+// Compiled directly into kernel
 kp.AddStaticMatrix("Dr", differentiationMatrix)
-
-// Less efficient - passed as parameter
-kernel.Run(Dr, ...)  
 ```
 
-### 4. Batch Operations
+### 4. Use Generated Macros
 
-Process multiple arrays in single kernel:
+The generated macros handle offset calculations and enable compiler optimizations:
 ```c
-@kernel void batchProcess(...) {
-    for (int part = 0; part < NPART; ++part; @outer) {
-        for (int i = 0; i < 32; ++i; @inner) {
-            if (i == 0) {
-                // Get all partition pointers
-                real_t* A = A_PART(part);
-                real_t* B = B_PART(part);
-                real_t* C = C_PART(part);
-                
-                // Process together for cache efficiency
-                for (int elem = 0; elem < K[part]; ++elem) {
-                    C[elem] = A[elem] + B[elem];
-                }
-            }
-        }
-    }
-}
+// Use the partition access macros
+const real_t* data = data_PART(part);
+
+// Use matrix operation macros - compiler will vectorize
+MATMUL_Dr(input, output, K[part], NP);
 ```
 
 ## Complete Examples
@@ -430,7 +468,7 @@ func main() {
     }
     kp.AllocateArrays(arrays)
     
-    // Kernel source
+    // Kernel source - partitions are parallel, operations within are compiler-vectorized
     kernelSource := `
     @kernel void vectorAdd(
         const int_t* K,
@@ -439,16 +477,14 @@ func main() {
         real_t* C_global, const int_t* C_offsets
     ) {
         for (int part = 0; part < NPART; ++part; @outer) {
-            for (int i = 0; i < 32; ++i; @inner) {
-                if (i == 0) {
-                    const real_t* A = A_PART(part);
-                    const real_t* B = B_PART(part);
-                    real_t* C = C_PART(part);
-                    
-                    for (int elem = 0; elem < K[part]; ++elem) {
-                        C[elem] = A[elem] + B[elem];
-                    }
-                }
+            const real_t* A = A_PART(part);
+            const real_t* B = B_PART(part);
+            real_t* C = C_PART(part);
+            
+            // Process all elements in partition
+            // Compiler will vectorize this loop
+            for (int elem = 0; elem < K[part]; ++elem) {
+                C[elem] = A[elem] + B[elem];
             }
         }
     }
@@ -481,7 +517,16 @@ import "gonum.org/v1/gonum/mat"
 Dr := mat.NewDense(10, 10, drData)  // 10x10 differentiation matrix
 kp.AddStaticMatrix("Dr", Dr)
 
-// Kernel for matrix-vector multiply
+### Example 2: Matrix-Vector Multiplication
+
+```go
+// Setup differentiation matrix
+import "gonum.org/v1/gonum/mat"
+
+Dr := mat.NewDense(10, 10, drData)  // 10x10 differentiation matrix
+kp.AddStaticMatrix("Dr", Dr)
+
+// Kernel using generated macro
 kernelSource := `
 #define NP 10
 
@@ -491,81 +536,62 @@ kernelSource := `
     real_t* DU_global, const int_t* DU_offsets
 ) {
     for (int part = 0; part < NPART; ++part; @outer) {
-        for (int worker = 0; worker < 32; ++worker; @inner) {
-            if (worker == 0) {
-                const real_t* U = U_PART(part);
-                real_t* DU = DU_PART(part);
-                
-                // Apply Dr to each element's nodes
-                MATMUL_Dr(U, DU, K[part], NP);
-            }
-        }
+        const real_t* U = U_PART(part);
+        real_t* DU = DU_PART(part);
+        
+        // Apply differentiation matrix to all elements
+        // The macro contains vectorizable loops
+        MATMUL_Dr(U, DU, K[part], NP);
     }
 }
 `
+```
 ```
 
 ### Example 3: Finite Element Assembly
 
 ```go
-// Complex example with multiple operations
-kernelSource := `
-#define NP 8     // Nodes per element
-#define NDIM 3   // 3D problem
+### Example 3: Using Multiple Arrays
 
-@kernel void assembleVolume(
+```go
+// Example showing KernelProgram's automatic parameter handling
+kernelSource := `
+@kernel void processMultipleArrays(
     const int_t* K,
     const real_t* U_global, const int_t* U_offsets,
+    const real_t* V_global, const int_t* V_offsets,
     const real_t* J_global, const int_t* J_offsets,
-    const real_t* rx_global, const int_t* rx_offsets,
-    const real_t* ry_global, const int_t* ry_offsets,
-    const real_t* rz_global, const int_t* rz_offsets,
     real_t* RHS_global, const int_t* RHS_offsets
 ) {
     for (int part = 0; part < NPART; ++part; @outer) {
-        for (int tid = 0; tid < 32; ++tid; @inner) {
-            if (tid == 0) {
-                // Get all partition data
-                const real_t* U = U_PART(part);
-                const real_t* J = J_PART(part);
-                const real_t* rx = rx_PART(part);
-                const real_t* ry = ry_PART(part);
-                const real_t* rz = rz_PART(part);
-                real_t* RHS = RHS_PART(part);
-                
-                // Temporary storage for derivatives
-                real_t Ur[NP], Us[NP], Ut[NP];
-                
-                // Process each element in partition
-                for (int e = 0; e < K[part]; ++e) {
-                    int offset = e * NP;
-                    
-                    // Compute derivatives using static matrices
-                    MATMUL_Dr(&U[offset], Ur, 1, NP);
-                    MATMUL_Ds(&U[offset], Us, 1, NP);
-                    MATMUL_Dt(&U[offset], Ut, 1, NP);
-                    
-                    // Apply geometric factors
-                    for (int n = 0; n < NP; ++n) {
-                        int idx = offset + n;
-                        real_t dUdx = rx[idx]*Ur[n] + ry[idx]*Us[n] + rz[idx]*Ut[n];
-                        RHS[idx] = J[idx] * dUdx;
-                    }
-                }
-            }
+        // KernelProgram's macros give clean partition access
+        const real_t* U = U_PART(part);
+        const real_t* V = V_PART(part);
+        const real_t* J = J_PART(part);
+        real_t* RHS = RHS_PART(part);
+        
+        // Process partition data
+        for (int i = 0; i < K[part]; ++i) {
+            RHS[i] = J[i] * (U[i] + V[i]);
         }
     }
 }
 `
+
+// KernelProgram handles all the parameter expansion
+err := kp.RunKernel("processMultipleArrays", "U", "V", "J", "RHS")
+// This automatically passes: K, U_global, U_offsets, V_global, V_offsets, etc.
+```
 ```
 
 ## Performance Tips
 
-1. **Use appropriate inner loop sizes**: Powers of 2 (32, 64, 128) work well
-2. **Minimize partition imbalance**: Try to keep K values similar
-3. **Align critical arrays**: Use CacheLineAlign for frequently accessed data
-4. **Batch operations**: Process multiple arrays in single kernel pass
-5. **Embed matrices**: Use AddStaticMatrix for frequently used operators
+1. **Balance partition sizes**: Keep K values similar for better load distribution
+2. **Use memory alignment**: CacheLineAlign for CPU, WarpAlign for GPU
+3. **Embed static matrices**: Use AddStaticMatrix for frequently used operators
+4. **Leverage generated macros**: They enable compiler vectorization
+5. **Consider data locality**: Process related data together
+6. **Use shared memory**: For data reuse within work groups where appropriate
 
 ## Troubleshooting
 
@@ -577,9 +603,10 @@ kernelSource := `
 - Ensure macros like NPART are not redefined
 
 **Problem**: Wrong results
-- Verify partition access uses `arrayName_PART(part)`
-- Check loop bounds use `K[part]` not total size
-- Ensure single thread (i==0) processes partition data
+- Verify partition access uses `arrayName_PART(part)` macro
+- Check loop bounds use `K[part]` for partition size
+- Ensure array allocations match kernel expectations
+- Verify data types match (Float64 vs Float32, etc.)
 
 **Problem**: Poor performance
 - Check memory alignment settings
