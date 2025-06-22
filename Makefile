@@ -5,6 +5,9 @@ gocca:
 test:
 	. ~/.bashrc && go test -parallel=1 -cover ./...
 
+bench:
+	go test -bench=BenchmarkParallelScalingLarge -benchtime=10x ./kernel_program
+
 tidy:
 	go mod tidy
 
