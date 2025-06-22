@@ -612,3 +612,151 @@ func createTestDevice(t *testing.T) *gocca.OCCADevice {
 	}
 	return device
 }
+
+// Test 4.2: Kernel execution with matrix operation - DEBUG VERSION
+func TestKernelProgram_Execution_MatrixOperation_Debug(t *testing.T) {
+	device := createTestDevice(t)
+	defer device.Free()
+
+	np := 3
+	k := []int{2, 3}
+	totalNodes := 5 * np
+
+	kp := NewKernelProgram(device, Config{
+		K:         k,
+		FloatType: Float64,
+	})
+	defer kp.Free()
+
+	// Add identity matrix for simple testing
+	I := mat.NewDense(np, np, []float64{
+		1, 0, 0,
+		0, 1, 0,
+		0, 0, 1,
+	})
+	kp.AddStaticMatrix("I", I)
+
+	// Allocate arrays
+	specs := []ArraySpec{
+		{Name: "U", Size: int64(totalNodes * 8), DataType: Float64},
+		{Name: "V", Size: int64(totalNodes * 8), DataType: Float64},
+	}
+	err := kp.AllocateArrays(specs)
+	if err != nil {
+		t.Fatalf("Failed to allocate: %v", err)
+	}
+
+	// Get and print offsets to understand memory layout
+	offsetsMem := kp.GetOffsets("U")
+	offsets := make([]int64, 3) // NumPartitions + 1
+	if kp.GetIntSize() == 4 {
+		offsets32 := make([]int32, 3)
+		offsetsMem.CopyTo(unsafe.Pointer(&offsets32[0]), int64(3*4))
+		for i, v := range offsets32 {
+			offsets[i] = int64(v)
+		}
+	} else {
+		offsetsMem.CopyTo(unsafe.Pointer(&offsets[0]), int64(3*8))
+	}
+
+	t.Logf("Offsets: %v", offsets)
+	t.Logf("Expected partition 0: nodes 0-5 (offset %d)", offsets[0])
+	t.Logf("Expected partition 1: nodes 6-14 (offset %d)", offsets[1])
+
+	// Initialize U with test data
+	U := make([]float64, totalNodes)
+	for i := range U {
+		U[i] = float64(i)
+	}
+
+	// Write to device using proper method that handles offsets
+	// Method 1: Direct copy (current test approach)
+	kp.GetMemory("U").CopyFrom(unsafe.Pointer(&U[0]), int64(totalNodes*8))
+
+	// Read back U to verify it was written correctly
+	UCheck := make([]float64, totalNodes)
+	kp.GetMemory("U").CopyTo(unsafe.Pointer(&UCheck[0]), int64(totalNodes*8))
+
+	t.Log("U after writing to device:")
+	for i := 0; i < totalNodes; i++ {
+		if math.Abs(UCheck[i]-U[i]) > 1e-10 {
+			t.Errorf("U[%d] not written correctly: expected %f, got %f", i, U[i], UCheck[i])
+		}
+	}
+
+	// Initialize V to non-zero values to detect if kernel runs
+	VInit := make([]float64, totalNodes)
+	for i := range VInit {
+		VInit[i] = -1.0 // Initialize to -1 to see what changes
+	}
+	kp.GetMemory("V").CopyFrom(unsafe.Pointer(&VInit[0]), int64(totalNodes*8))
+
+	// Kernel using MATMUL macro with @inner
+	kernelSource := fmt.Sprintf(`
+#define NP %d
+
+@kernel void applyIdentity(
+	const int_t* K,
+	const real_t* U_global,
+	const int_t* U_offsets,
+	real_t* V_global,
+	const int_t* V_offsets
+) {
+	for (int part = 0; part < NPART; ++part; @outer) {
+		const real_t* U = U_PART(part);
+		real_t* V = V_PART(part);
+		
+		// Debug: Check if we're processing partition 1
+		if (part == 1) {
+			// Manually process first element to verify pointers
+			for (int i = 0; i < NP; ++i) {
+				V[i] = U[i] + 1000.0; // Add 1000 to make it obvious
+			}
+		}
+		
+		MATMUL_I(U, V, K[part], NP);
+	}
+}
+`, np)
+
+	_, err = kp.BuildKernel(kernelSource, "applyIdentity")
+	if err != nil {
+		t.Fatalf("Failed to build kernel: %v", err)
+	}
+
+	err = kp.RunKernel("applyIdentity", "U", "V")
+	if err != nil {
+		t.Fatalf("Kernel execution failed: %v", err)
+	}
+
+	// Verify result (identity matrix should copy U to V)
+	result, err := CopyArrayToHost[float64](kp, "V")
+	if err != nil {
+		t.Fatalf("Failed to copy result: %v", err)
+	}
+
+	// Also get raw V to see any padding
+	VRaw := make([]float64, totalNodes)
+	kp.GetMemory("V").CopyTo(unsafe.Pointer(&VRaw[0]), int64(totalNodes*8))
+
+	t.Log("Results:")
+	t.Logf("Length of result from CopyArrayToHost: %d", len(result))
+
+	// Check each element
+	for i := 0; i < totalNodes; i++ {
+		t.Logf("Node %d: U=%f, V(CopyArrayToHost)=%f, V(raw)=%f, expected=%f",
+			i, U[i], result[i], VRaw[i], U[i])
+		if math.Abs(result[i]-U[i]) > 1e-10 {
+			t.Errorf("Element %d: expected %f, got %f", i, U[i], result[i])
+		}
+	}
+
+	// Print generated preamble for inspection
+	preamble := kp.GeneratePreamble()
+	t.Logf("KpartMax from preamble: %v", kp.KpartMax)
+
+	// Check if the macro is correct
+	if strings.Contains(preamble, "MATMUL_I") {
+		t.Log("MATMUL_I macro found in preamble")
+	}
+}

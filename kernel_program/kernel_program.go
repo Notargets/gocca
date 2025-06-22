@@ -240,10 +240,25 @@ func (kp *KernelProgram) initializeKArray() error {
 }
 
 // calculateAlignedOffsetsAndSize calculates partition offsets and total size needed
+// FIXED VERSION - returns offsets in units matching the pointer type
 func (kp *KernelProgram) calculateAlignedOffsetsAndSize(spec ArraySpec) ([]int64, int64) {
 	offsets := make([]int64, kp.NumPartitions+1)
 	totalElements := kp.getTotalElements()
 	bytesPerElement := spec.Size / int64(totalElements)
+
+	// CRITICAL FIX: Determine the size of individual values
+	var valueSize int64
+	switch spec.DataType {
+	case Float32, INT32:
+		valueSize = 4
+	case Float64, INT64:
+		valueSize = 8
+	default:
+		// Default to 8 bytes if not specified
+		valueSize = 8
+	}
+
+	valuesPerElement := bytesPerElement / valueSize
 
 	alignment := int64(spec.Alignment)
 	if alignment == 0 {
@@ -257,19 +272,20 @@ func (kp *KernelProgram) calculateAlignedOffsetsAndSize(spec ArraySpec) ([]int64
 			currentByteOffset = ((currentByteOffset + alignment - 1) / alignment) * alignment
 		}
 
-		// Store element offset (not byte offset)
-		offsets[i] = currentByteOffset / bytesPerElement
+		// CRITICAL FIX: Store offset in units of VALUES, not elements
+		// This makes pointer arithmetic work correctly: ptr + offset
+		offsets[i] = currentByteOffset / valueSize
 
 		// Advance by partition data size
-		partitionBytes := int64(kp.K[i]) * bytesPerElement
-		currentByteOffset += partitionBytes
+		partitionValues := int64(kp.K[i]) * valuesPerElement
+		currentByteOffset += partitionValues * valueSize
 	}
 
 	// Final offset for bounds checking
 	if currentByteOffset%alignment != 0 {
 		currentByteOffset = ((currentByteOffset + alignment - 1) / alignment) * alignment
 	}
-	offsets[kp.NumPartitions] = currentByteOffset / bytesPerElement
+	offsets[kp.NumPartitions] = currentByteOffset / valueSize
 
 	return offsets, currentByteOffset
 }
