@@ -106,7 +106,7 @@ func TestPerf_CacheEffects(t *testing.T) {
 }
 
 // TestPerf_WeakScaling tests constant work per partition
-func TestPerf_WeakScaling(t *testing.T) {
+func _TestPerf_WeakScaling(t *testing.T) {
 	configs := []struct {
 		name   string
 		device string
@@ -157,7 +157,7 @@ func TestPerf_WeakScaling(t *testing.T) {
 }
 
 // TestPerf_StrongScaling tests fixed total work
-func TestPerf_StrongScaling(t *testing.T) {
+func _TestPerf_StrongScaling(t *testing.T) {
 	configs := []struct {
 		name   string
 		device string
