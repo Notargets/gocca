@@ -13,7 +13,6 @@ import (
 type DataType int
 
 const (
-	// Start from 1 to allow 0 to mean "unspecified"
 	Float32 DataType = iota + 1
 	Float64
 	INT32
@@ -33,34 +32,34 @@ const (
 // ArraySpec defines user requirements for array allocation
 type ArraySpec struct {
 	Name      string
-	Size      int64         // Total size in bytes
-	Alignment AlignmentType // Alignment requirement
-	DataType  DataType      // Optional: specify Float32, Float64, Int32, or Int64
+	Size      int64
+	Alignment AlignmentType
+	DataType  DataType
 }
 
 // arrayMetadata tracks information about allocated arrays
 type arrayMetadata struct {
-	spec             ArraySpec
-	dataType         DataType // Float32, Float64, Int32, or Int64
-	elementsPerValue int      // e.g., 1 for scalars, N for vectors
+	spec     ArraySpec
+	dataType DataType
 }
 
 // KernelProgram manages code generation and execution for partition-parallel kernels
 type KernelProgram struct {
 	// Partition configuration
-	NumPartitions int   // Number of partitions
-	K             []int // Variable elements per partition
+	NumPartitions int
+	K             []int
+	KpartMax      int // Maximum K value across all partitions
 
 	// Type configuration
-	FloatType DataType // Float32 or Float64
-	IntType   DataType // Int32 or Int64
+	FloatType DataType
+	IntType   DataType
 
 	// Static data to embed
-	StaticMatrices map[string]mat.Matrix // Changed from Matrix to mat.Matrix
+	StaticMatrices map[string]mat.Matrix
 
 	// Array tracking for macro generation
 	allocatedArrays []string
-	arrayMetadata   map[string]arrayMetadata // Track array information
+	arrayMetadata   map[string]arrayMetadata
 
 	// Generated code
 	kernelPreamble string
@@ -73,47 +72,47 @@ type KernelProgram struct {
 
 // Config holds configuration for creating a KernelProgram
 type Config struct {
-	NumPartitions int   // Number of partitions
-	K             []int // Elements per partition (variable)
-	FloatType     DataType
-	IntType       DataType
+	K         []int
+	FloatType DataType
+	IntType   DataType
 }
 
-// NewKernelProgram creates a new KernelProgram with the given configuration
+// NewKernelProgram creates a new KernelProgram instance
 func NewKernelProgram(device *gocca.OCCADevice, cfg Config) *KernelProgram {
-	// Validate device
 	if device == nil {
 		panic("device cannot be nil")
 	}
-
-	if !device.IsInitialized() {
-		panic("device is not initialized")
-	}
-
-	// Validate partition configuration
 	if len(cfg.K) == 0 {
 		panic("K array cannot be empty")
 	}
 
-	if cfg.NumPartitions == 0 {
-		cfg.NumPartitions = len(cfg.K)
-	} else if cfg.NumPartitions != len(cfg.K) {
-		panic("NumPartitions must match length of K array")
+	// Compute KpartMax
+	kpartMax := 0
+	for _, k := range cfg.K {
+		if k > kpartMax {
+			kpartMax = k
+		}
 	}
 
-	// Set type defaults only if both are zero
-	if cfg.FloatType == 0 && cfg.IntType == 0 {
-		cfg.FloatType = Float64
-		cfg.IntType = INT64
+	// Set defaults
+	floatType := cfg.FloatType
+	if floatType == 0 {
+		floatType = Float64
+	}
+
+	intType := cfg.IntType
+	if intType == 0 {
+		intType = INT64
 	}
 
 	kp := &KernelProgram{
-		NumPartitions:   cfg.NumPartitions,
+		NumPartitions:   len(cfg.K),
 		K:               make([]int, len(cfg.K)),
-		FloatType:       cfg.FloatType,
-		IntType:         cfg.IntType,
-		StaticMatrices:  make(map[string]mat.Matrix), // Changed from Matrix to mat.Matrix
-		allocatedArrays: []string{},
+		KpartMax:        kpartMax,
+		FloatType:       floatType,
+		IntType:         intType,
+		StaticMatrices:  make(map[string]mat.Matrix),
+		allocatedArrays: make([]string, 0),
 		arrayMetadata:   make(map[string]arrayMetadata),
 		device:          device,
 		kernels:         make(map[string]*gocca.OCCAKernel),
@@ -123,91 +122,108 @@ func NewKernelProgram(device *gocca.OCCADevice, cfg Config) *KernelProgram {
 	// Copy K values
 	copy(kp.K, cfg.K)
 
+	// Initialize K array on device
+	if err := kp.initializeKArray(); err != nil {
+		panic(fmt.Sprintf("failed to initialize K array: %v", err))
+	}
+
 	return kp
 }
 
-// AddStaticMatrix adds a matrix that will be compiled into kernels as static data
-func (kp *KernelProgram) AddStaticMatrix(name string, matrix mat.Matrix) { // Changed from Matrix to mat.Matrix
-	kp.StaticMatrices[name] = matrix
-}
-
-// AllocateArrays allocates device memory with user-specified requirements
-func (kp *KernelProgram) AllocateArrays(specs []ArraySpec) error {
-	for _, spec := range specs {
-		// Step 1: Calculate aligned offsets first
-		offsets, totalSize := kp.calculateAlignedOffsetsAndSize(spec)
-
-		// Step 2: Allocate global pool with exact calculated size
-		memory := kp.device.Malloc(totalSize, nil, nil)
-		if memory == nil {
-			return fmt.Errorf("failed to allocate %s", spec.Name)
-		}
-		kp.pooledMemory[spec.Name+"_global"] = memory
-
-		// Step 3: Store offsets array - convert to appropriate int type
-		offsetSize := int64(len(offsets)) * int64(kp.GetIntSize())
-		var offsetMem *gocca.OCCAMemory
-
-		if kp.GetIntSize() == 4 {
-			// Convert int64 offsets to int32 before storing
-			offsets32 := make([]int32, len(offsets))
-			for i, v := range offsets {
-				offsets32[i] = int32(v)
-			}
-			offsetMem = kp.device.Malloc(offsetSize, unsafe.Pointer(&offsets32[0]), nil)
-		} else {
-			// Store int64 offsets directly
-			offsetMem = kp.device.Malloc(offsetSize, unsafe.Pointer(&offsets[0]), nil)
-		}
-
-		if offsetMem == nil {
-			return fmt.Errorf("failed to allocate offsets for %s", spec.Name)
-		}
-		kp.pooledMemory[spec.Name+"_offsets"] = offsetMem
-
-		// Track array name for macro generation
-		kp.allocatedArrays = append(kp.allocatedArrays, spec.Name)
-
-		// Store metadata for later retrieval
-		// Use specified data type, or default to FloatType
-		dataType := spec.DataType
-		if dataType == 0 {
-			dataType = kp.FloatType
-		}
-
-		// Calculate element size based on data type
-		var elementSize int
-		switch dataType {
-		case Float32, INT32:
-			elementSize = 4
-		case Float64, INT64:
-			elementSize = 8
-		default:
-			elementSize = kp.GetFloatSize()
-		}
-
-		elementsPerValue := int(spec.Size) / (kp.getTotalElements() * elementSize)
-
-		kp.arrayMetadata[spec.Name] = arrayMetadata{
-			spec:             spec,
-			dataType:         dataType,
-			elementsPerValue: elementsPerValue,
+// Free releases all allocated resources
+func (kp *KernelProgram) Free() {
+	for _, kernel := range kp.kernels {
+		if kernel != nil {
+			kernel.Free()
 		}
 	}
 
-	// Allocate K array - same fix needed here
-	kSize := int64(len(kp.K)) * int64(kp.GetIntSize())
+	for _, memory := range kp.pooledMemory {
+		if memory != nil {
+			memory.Free()
+		}
+	}
+}
+
+// AddStaticMatrix adds a matrix to be embedded as static data in kernels
+func (kp *KernelProgram) AddStaticMatrix(name string, m mat.Matrix) {
+	kp.StaticMatrices[name] = m
+}
+
+// AllocateArrays allocates memory for arrays with specified alignments
+func (kp *KernelProgram) AllocateArrays(specs []ArraySpec) error {
+	for _, spec := range specs {
+		if err := kp.allocateArray(spec); err != nil {
+			return fmt.Errorf("failed to allocate %s: %w", spec.Name, err)
+		}
+	}
+	return nil
+}
+
+// allocateArray allocates a single array with offsets
+func (kp *KernelProgram) allocateArray(spec ArraySpec) error {
+	// Calculate aligned offsets
+	offsets, totalSize := kp.calculateAlignedOffsetsAndSize(spec)
+
+	// Allocate offset array with correct int size
+	var offsetMem *gocca.OCCAMemory
+	if kp.IntType == INT32 {
+		// Convert to int32 for storage
+		offsets32 := make([]int32, len(offsets))
+		for i, v := range offsets {
+			offsets32[i] = int32(v)
+		}
+		offsetSize := int64(len(offsets)) * 4
+		offsetMem = kp.device.Malloc(offsetSize, unsafe.Pointer(&offsets32[0]), nil)
+	} else {
+		offsetSize := int64(len(offsets)) * 8
+		offsetMem = kp.device.Malloc(offsetSize, unsafe.Pointer(&offsets[0]), nil)
+	}
+
+	if offsetMem == nil {
+		return fmt.Errorf("failed to allocate offset array")
+	}
+	kp.pooledMemory[spec.Name+"_offsets"] = offsetMem
+
+	// Allocate main array
+	mainMem := kp.device.Malloc(totalSize, nil, nil)
+	if mainMem == nil {
+		offsetMem.Free()
+		return fmt.Errorf("failed to allocate main array")
+	}
+	kp.pooledMemory[spec.Name+"_global"] = mainMem
+
+	// Track allocation
+	kp.allocatedArrays = append(kp.allocatedArrays, spec.Name)
+
+	// Determine data type
+	dataType := spec.DataType
+	if dataType == 0 {
+		dataType = kp.FloatType
+	}
+
+	kp.arrayMetadata[spec.Name] = arrayMetadata{
+		spec:     spec,
+		dataType: dataType,
+	}
+
+	return nil
+}
+
+// initializeKArray allocates and initializes the K array on device
+func (kp *KernelProgram) initializeKArray() error {
+	var kSize int64
 	var kMem *gocca.OCCAMemory
 
-	if kp.GetIntSize() == 4 {
-		// Convert int K values to int32
+	if kp.IntType == INT32 {
+		kSize = int64(kp.NumPartitions) * 4
 		k32 := make([]int32, len(kp.K))
 		for i, v := range kp.K {
 			k32[i] = int32(v)
 		}
 		kMem = kp.device.Malloc(kSize, unsafe.Pointer(&k32[0]), nil)
 	} else {
-		// Convert int K values to int64
+		kSize = int64(kp.NumPartitions) * 8
 		k64 := make([]int64, len(kp.K))
 		for i, v := range kp.K {
 			k64[i] = int64(v)
@@ -226,12 +242,13 @@ func (kp *KernelProgram) AllocateArrays(specs []ArraySpec) error {
 // calculateAlignedOffsetsAndSize calculates partition offsets and total size needed
 func (kp *KernelProgram) calculateAlignedOffsetsAndSize(spec ArraySpec) ([]int64, int64) {
 	offsets := make([]int64, kp.NumPartitions+1)
-
-	// Calculate bytes per element based on spec size and total elements
 	totalElements := kp.getTotalElements()
 	bytesPerElement := spec.Size / int64(totalElements)
 
 	alignment := int64(spec.Alignment)
+	if alignment == 0 {
+		alignment = int64(NoAlignment) // Default to no alignment (1)
+	}
 	currentByteOffset := int64(0)
 
 	for i := 0; i < kp.NumPartitions; i++ {
@@ -254,10 +271,7 @@ func (kp *KernelProgram) calculateAlignedOffsetsAndSize(spec ArraySpec) ([]int64
 	}
 	offsets[kp.NumPartitions] = currentByteOffset / bytesPerElement
 
-	// Total size is the final byte offset
-	totalSize := currentByteOffset
-
-	return offsets, totalSize
+	return offsets, currentByteOffset
 }
 
 // getTotalElements returns sum of all K values
@@ -282,7 +296,7 @@ func (kp *KernelProgram) GeneratePreamble() string {
 	// 3. Partition access macros
 	sb.WriteString(kp.generatePartitionMacros())
 
-	// 4. Matrix operation macros
+	// 4. Matrix operation macros with @inner
 	sb.WriteString(kp.generateMatrixMacros())
 
 	kp.kernelPreamble = sb.String()
@@ -312,8 +326,9 @@ func (kp *KernelProgram) generateTypeDefinitions() string {
 	sb.WriteString(fmt.Sprintf("#define REAL_ONE 1.0%s\n", floatSuffix))
 	sb.WriteString("\n")
 
-	// Constants - these would typically be set based on the specific kernel needs
+	// Constants
 	sb.WriteString(fmt.Sprintf("#define NPART %d\n", kp.NumPartitions))
+	sb.WriteString(fmt.Sprintf("#define KpartMax %d\n", kp.KpartMax))
 	sb.WriteString("\n")
 
 	return sb.String()
@@ -335,7 +350,7 @@ func (kp *KernelProgram) generateStaticMatrices() string {
 }
 
 // formatStaticMatrix formats a single matrix as a static C array
-func (kp *KernelProgram) formatStaticMatrix(name string, m mat.Matrix) string { // Changed from Matrix to mat.Matrix
+func (kp *KernelProgram) formatStaticMatrix(name string, m mat.Matrix) string {
 	rows, cols := m.Dims()
 	var sb strings.Builder
 
@@ -344,8 +359,7 @@ func (kp *KernelProgram) formatStaticMatrix(name string, m mat.Matrix) string { 
 		typeStr = "float"
 	}
 
-	sb.WriteString(fmt.Sprintf("const %s %s[%d][%d] = {\n",
-		typeStr, name, rows, cols))
+	sb.WriteString(fmt.Sprintf("const %s %s[%d][%d] = {\n", typeStr, name, rows, cols))
 
 	for i := 0; i < rows; i++ {
 		sb.WriteString("    {")
@@ -377,7 +391,6 @@ func (kp *KernelProgram) generatePartitionMacros() string {
 
 	sb.WriteString("// Partition access macros\n")
 
-	// Generate macro for each allocated array
 	for _, arrayName := range kp.allocatedArrays {
 		sb.WriteString(fmt.Sprintf("#define %s_PART(part) (%s_global + %s_offsets[part])\n",
 			arrayName, arrayName, arrayName))
@@ -390,35 +403,29 @@ func (kp *KernelProgram) generatePartitionMacros() string {
 	return sb.String()
 }
 
-// generateMatrixMacros creates vectorizable matrix multiplication macros
+// generateMatrixMacros creates matrix multiplication macros with @inner loop
 func (kp *KernelProgram) generateMatrixMacros() string {
 	var sb strings.Builder
 
-	sb.WriteString("// Vectorizable matrix multiplication macros\n")
+	sb.WriteString("// Matrix multiplication macros with @inner loop\n")
 
-	// Generate macro for each static matrix
 	for name, matrix := range kp.StaticMatrices {
 		rows, cols := matrix.Dims()
 
-		// Determine if it's a square matrix
 		if rows == cols {
-			// Square matrix macro (like differentiation matrices)
-			sb.WriteString(fmt.Sprintf("#define MATMUL_%s(IN, OUT, K_VAL, NP) do { \\\n", name))
-			sb.WriteString("    for (int i = 0; i < (NP); ++i) { \\\n")
-			sb.WriteString("        for (int elem = 0; elem < (K_VAL); ++elem) { \\\n")
-			sb.WriteString("            real_t sum = REAL_ZERO; \\\n")
-			sb.WriteString("            for (int j = 0; j < (NP); ++j) { \\\n")
-			sb.WriteString(fmt.Sprintf("                sum += %s[i][j] * (IN)[elem * (NP) + j]; \\\n", name))
+			// Square matrix macro with @inner loop over elements
+			sb.WriteString(fmt.Sprintf("#define MATMUL_%s(IN, OUT, K_VAL, NP) \\\n", name))
+			sb.WriteString("    for (int elem = 0; elem < KpartMax; ++elem; @inner) { \\\n")
+			sb.WriteString("        if (elem < (K_VAL)) { \\\n")
+			sb.WriteString("            for (int i = 0; i < (NP); ++i) { \\\n")
+			sb.WriteString("                real_t sum = REAL_ZERO; \\\n")
+			sb.WriteString("                for (int j = 0; j < (NP); ++j) { \\\n")
+			sb.WriteString(fmt.Sprintf("                    sum += %s[i][j] * (IN)[elem * (NP) + j]; \\\n", name))
+			sb.WriteString("                } \\\n")
+			sb.WriteString("                (OUT)[elem * (NP) + i] = sum; \\\n")
 			sb.WriteString("            } \\\n")
-			sb.WriteString("            (OUT)[elem * (NP) + i] = sum; \\\n")
 			sb.WriteString("        } \\\n")
-			sb.WriteString("    } \\\n")
-			sb.WriteString("} while(0)\n\n")
-		} else {
-			// Rectangular matrix macro (need to know input/output dimensions)
-			// For now, generate a comment explaining what's needed
-			sb.WriteString(fmt.Sprintf("// Note: %s is a %dx%d rectangular matrix\n", name, rows, cols))
-			sb.WriteString(fmt.Sprintf("// Macro generation requires knowledge of input dimensions\n\n"))
+			sb.WriteString("    }\n\n")
 		}
 	}
 
@@ -441,7 +448,7 @@ func (kp *KernelProgram) BuildKernel(kernelSource, kernelName string) (*gocca.OC
 		return nil, fmt.Errorf("failed to build kernel %s: %w", kernelName, err)
 	}
 
-	// Register if build succeeded
+	// Register kernel
 	if kernel != nil {
 		kp.kernels[kernelName] = kernel
 		return kernel, nil
@@ -464,10 +471,9 @@ func (kp *KernelProgram) RunKernel(name string, args ...interface{}) error {
 		Z: 1,
 	}
 
-	// Inner dimensions would be set based on the specific kernel requirements
-	// For now, use a default
+	// Inner dimensions set to KpartMax for element parallelism
 	innerDims := gocca.OCCADim{
-		X: 32, // Default work group size
+		X: uint64(kp.KpartMax),
 		Y: 1,
 		Z: 1,
 	}
@@ -491,13 +497,14 @@ func (kp *KernelProgram) expandKernelArgs(args []interface{}) []interface{} {
 	for _, arg := range args {
 		switch v := arg.(type) {
 		case string:
-			// Check if this is an allocated array name
-			if kp.isAllocatedArray(v) {
-				// Add both _global and _offsets
-				expanded = append(expanded, kp.pooledMemory[v+"_global"])
-				expanded = append(expanded, kp.pooledMemory[v+"_offsets"])
+			// Array name - expand to global and offsets
+			globalMem, hasGlobal := kp.pooledMemory[v+"_global"]
+			offsetMem, hasOffset := kp.pooledMemory[v+"_offsets"]
+
+			if hasGlobal && hasOffset {
+				expanded = append(expanded, globalMem, offsetMem)
 			} else {
-				// Not an array name, pass as-is
+				// Pass through if not a recognized array
 				expanded = append(expanded, arg)
 			}
 		default:
@@ -509,62 +516,33 @@ func (kp *KernelProgram) expandKernelArgs(args []interface{}) []interface{} {
 	return expanded
 }
 
-// isAllocatedArray checks if a name corresponds to an allocated array
-func (kp *KernelProgram) isAllocatedArray(name string) bool {
-	for _, arrayName := range kp.allocatedArrays {
-		if arrayName == name {
-			return true
-		}
-	}
-	return false
-}
-
-// GetMemory returns a device memory handle by name
-func (kp *KernelProgram) GetMemory(name string) *gocca.OCCAMemory {
-	// First check if it's a direct memory name
-	if mem, exists := kp.pooledMemory[name]; exists {
+// GetMemory returns the device memory handle for an array
+func (kp *KernelProgram) GetMemory(arrayName string) *gocca.OCCAMemory {
+	if mem, exists := kp.pooledMemory[arrayName+"_global"]; exists {
 		return mem
 	}
-
-	// Check if it's an allocated array (return the _global version)
-	if kp.isAllocatedArray(name) {
-		return kp.pooledMemory[name+"_global"]
-	}
-
 	return nil
 }
 
-// GetFloatSize returns the size in bytes of the float type
-func (kp *KernelProgram) GetFloatSize() int {
-	if kp.FloatType == Float32 {
-		return 4
+// GetOffsets returns the offset memory handle for an array
+func (kp *KernelProgram) GetOffsets(arrayName string) *gocca.OCCAMemory {
+	if mem, exists := kp.pooledMemory[arrayName+"_offsets"]; exists {
+		return mem
 	}
-	return 8
+	return nil
 }
 
-// GetIntSize returns the size in bytes of the int type
-func (kp *KernelProgram) GetIntSize() int {
-	if kp.IntType == INT32 {
-		return 4
-	}
-	return 8
+// GetArrayMetadata returns metadata for a named array
+func (kp *KernelProgram) GetArrayMetadata(arrayName string) (arrayMetadata, bool) {
+	meta, exists := kp.arrayMetadata[arrayName]
+	return meta, exists
 }
 
-// Free releases all allocated resources
-func (kp *KernelProgram) Free() {
-	// Free kernels
-	for _, kernel := range kp.kernels {
-		if kernel != nil {
-			kernel.Free()
-		}
-	}
-
-	// Free memory
-	for _, mem := range kp.pooledMemory {
-		if mem != nil {
-			mem.Free()
-		}
-	}
+// GetAllocatedArrays returns list of allocated array names
+func (kp *KernelProgram) GetAllocatedArrays() []string {
+	result := make([]string, len(kp.allocatedArrays))
+	copy(result, kp.allocatedArrays)
+	return result
 }
 
 // GetArrayType returns the data type of an allocated array
@@ -583,8 +561,26 @@ func (kp *KernelProgram) GetArrayLogicalSize(name string) (int, error) {
 		return 0, fmt.Errorf("array %s not found", name)
 	}
 
-	// Total elements = total elements across all partitions * elements per value
-	return kp.getTotalElements() * metadata.elementsPerValue, nil
+	// Return the total size divided by the size of the data type
+	var elementSize int64
+	switch metadata.dataType {
+	case Float32, INT32:
+		elementSize = 4
+	case Float64, INT64:
+		elementSize = 8
+	default:
+		return 0, fmt.Errorf("unknown data type")
+	}
+
+	return int(metadata.spec.Size / elementSize), nil
+}
+
+// GetIntSize returns the size of int type in bytes
+func (kp *KernelProgram) GetIntSize() int {
+	if kp.IntType == INT32 {
+		return 4
+	}
+	return 8
 }
 
 // CopyArrayToHost copies array data from device to host, removing alignment padding
@@ -630,28 +626,44 @@ func CopyArrayToHost[T any](kp *KernelProgram, name string) ([]T, error) {
 		offsetsMem.CopyTo(unsafe.Pointer(&offsets[0]), int64(numOffsets*8))
 	}
 
-	// Calculate total logical elements
-	totalLogicalElements := kp.getTotalElements() * metadata.elementsPerValue
-
-	// Allocate result array
-	result := make([]T, totalLogicalElements)
-
-	// Determine element size
+	// Calculate how many T values we need
 	elementSize := int64(unsafe.Sizeof(sample))
+	totalBytes := metadata.spec.Size
+	totalValues := int(totalBytes / elementSize)
 
-	// Read all data including padding
-	totalSize := offsets[kp.NumPartitions] * elementSize
-	tempData := make([]T, offsets[kp.NumPartitions])
-	memory.CopyTo(unsafe.Pointer(&tempData[0]), totalSize)
+	// Allocate result array for logical data (no padding)
+	result := make([]T, totalValues)
 
-	// Copy data partition by partition, skipping alignment padding
+	// For unaligned data, we can copy directly
+	if metadata.spec.Alignment == NoAlignment || metadata.spec.Alignment == 0 {
+		memory.CopyTo(unsafe.Pointer(&result[0]), totalBytes)
+		return result, nil
+	}
+
+	// For aligned data, we need to copy partition by partition to skip padding
+	// First, read all data including padding
+	paddedBytes := offsets[kp.NumPartitions] * elementSize
+	paddedValues := int(paddedBytes / elementSize)
+	tempData := make([]T, paddedValues)
+	memory.CopyTo(unsafe.Pointer(&tempData[0]), paddedBytes)
+
+	// Now copy data from each partition, skipping alignment padding
 	destIdx := 0
-	for part := 0; part < kp.NumPartitions; part++ {
-		startIdx := offsets[part]
-		partitionElements := kp.K[part] * metadata.elementsPerValue
+	valuesPerKElement := int(totalBytes / elementSize / int64(kp.getTotalElements()))
 
-		for i := 0; i < partitionElements; i++ {
-			result[destIdx] = tempData[startIdx+int64(i)]
+	for part := 0; part < kp.NumPartitions; part++ {
+		startIdx := int(offsets[part])
+		partitionValues := kp.K[part] * valuesPerKElement
+
+		// Copy this partition's data
+		for i := 0; i < partitionValues; i++ {
+			if destIdx >= len(result) {
+				return nil, fmt.Errorf("internal error: destination index out of bounds")
+			}
+			if startIdx+i >= len(tempData) {
+				return nil, fmt.Errorf("internal error: source index out of bounds")
+			}
+			result[destIdx] = tempData[startIdx+i]
 			destIdx++
 		}
 	}
@@ -679,61 +691,56 @@ func CopyPartitionToHost[T any](kp *KernelProgram, name string, partitionID int)
 			metadata.dataType, requestedType)
 	}
 
-	// Calculate partition size
-	partitionElements := kp.K[partitionID] * metadata.elementsPerValue
+	// Calculate sizes
+	elementSize := int64(unsafe.Sizeof(sample))
+	totalBytes := metadata.spec.Size
+	valuesPerKElement := int(totalBytes / elementSize / int64(kp.getTotalElements()))
+	partitionValues := kp.K[partitionID] * valuesPerKElement
 
-	// Handle empty partition case early
-	if partitionElements == 0 {
-		return make([]T, 0), nil
+	if partitionValues == 0 {
+		return []T{}, nil // Empty partition
 	}
 
-	// Get memory and offsets
-	globalMem := kp.pooledMemory[name+"_global"]
+	// Get offsets
 	offsetsMem := kp.pooledMemory[name+"_offsets"]
-
-	if globalMem == nil || offsetsMem == nil {
-		return nil, fmt.Errorf("memory not allocated for array %s", name)
+	if offsetsMem == nil {
+		return nil, fmt.Errorf("offsets for %s not found", name)
 	}
 
-	// Get offsets - fixed to handle int32 correctly
 	numOffsets := kp.NumPartitions + 1
-	offsets := make([]int64, numOffsets)
+	var offsets []int64
 
 	if kp.GetIntSize() == 4 {
-		// For int32, copy to int32 array first, then convert
 		offsets32 := make([]int32, numOffsets)
-		offsetSize := int64(numOffsets * 4)
-		offsetsMem.CopyTo(unsafe.Pointer(&offsets32[0]), offsetSize)
+		offsetsMem.CopyTo(unsafe.Pointer(&offsets32[0]), int64(numOffsets*4))
+		offsets = make([]int64, numOffsets)
 		for i, v := range offsets32 {
 			offsets[i] = int64(v)
 		}
 	} else {
-		// For int64, copy directly
-		offsetSize := int64(numOffsets * 8)
-		offsetsMem.CopyTo(unsafe.Pointer(&offsets[0]), offsetSize)
+		offsets = make([]int64, numOffsets)
+		offsetsMem.CopyTo(unsafe.Pointer(&offsets[0]), int64(numOffsets*8))
 	}
 
-	// Allocate result array
-	result := make([]T, partitionElements)
+	// Allocate result
+	result := make([]T, partitionValues)
 
-	// Determine element size
-	elementSize := int64(unsafe.Sizeof(sample))
-
-	// Read all data including padding
-	totalSize := offsets[kp.NumPartitions] * elementSize
-	tempData := make([]T, offsets[kp.NumPartitions])
-	globalMem.CopyTo(unsafe.Pointer(&tempData[0]), totalSize)
-
-	// Copy just this partition's data
-	startIdx := offsets[partitionID]
-	for i := 0; i < partitionElements; i++ {
-		result[i] = tempData[startIdx+int64(i)]
+	// Get memory
+	memory := kp.GetMemory(name)
+	if memory == nil {
+		return nil, fmt.Errorf("memory for %s not found", name)
 	}
+
+	// Copy partition data
+	startOffset := offsets[partitionID] * elementSize
+	bytes := int64(partitionValues) * elementSize
+
+	memory.CopyToWithOffset(unsafe.Pointer(&result[0]), bytes, startOffset)
 
 	return result, nil
 }
 
-// Helper function to determine DataType from a sample value
+// getDataTypeFromSample infers DataType from a sample value
 func getDataTypeFromSample(sample interface{}) DataType {
 	switch sample.(type) {
 	case float32:

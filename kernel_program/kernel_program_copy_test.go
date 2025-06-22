@@ -77,25 +77,25 @@ func TestGetArrayType_ErrorCases(t *testing.T) {
 }
 
 // Test 1.3: GetArrayLogicalSize basic functionality
-func TestGetArrayLogicalSize_SinglePartition(t *testing.T) {
+func TestGetArrayLogicalSize_BasicFunctionality(t *testing.T) {
 	device := createTestDevice(t)
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{
-		K: []int{5},
-	})
+	kp := NewKernelProgram(device, Config{K: []int{10}})
 	defer kp.Free()
 
-	// Test with different element counts per value
+	// Test arrays of different sizes
 	testCases := []struct {
-		name             string
-		size             int64
-		elementsPerValue int
-		expectedSize     int
+		name         string
+		size         int64
+		dataType     DataType
+		expectedSize int
 	}{
-		{"scalar_array", 5 * 8, 1, 5},         // 5 elements * 1 value each
-		{"vector3_array", 5 * 3 * 8, 3, 15},   // 5 elements * 3 values each
-		{"matrix4_array", 5 * 16 * 8, 16, 80}, // 5 elements * 16 values each
+		{"small_float64", 10 * 8, Float64, 10},
+		{"large_float64", 100 * 8, Float64, 100},
+		{"small_float32", 20 * 4, Float32, 20},
+		{"small_int32", 15 * 4, INT32, 15},
+		{"small_int64", 25 * 8, INT64, 25},
 	}
 
 	for _, tc := range testCases {
@@ -103,20 +103,13 @@ func TestGetArrayLogicalSize_SinglePartition(t *testing.T) {
 			spec := ArraySpec{
 				Name:      tc.name,
 				Size:      tc.size,
-				DataType:  Float64,
+				DataType:  tc.dataType,
 				Alignment: NoAlignment,
 			}
 
-			// Manually set elementsPerValue in metadata after allocation
 			err := kp.AllocateArrays([]ArraySpec{spec})
 			if err != nil {
 				t.Fatalf("Failed to allocate: %v", err)
-			}
-
-			// Update metadata to reflect elementsPerValue
-			if metadata, exists := kp.arrayMetadata[tc.name]; exists {
-				metadata.elementsPerValue = tc.elementsPerValue
-				kp.arrayMetadata[tc.name] = metadata
 			}
 
 			size, err := kp.GetArrayLogicalSize(tc.name)
@@ -161,6 +154,7 @@ func TestGetArrayLogicalSize_MultiplePartitions(t *testing.T) {
 				totalK += k
 			}
 
+			// Allocate with total size = totalK elements * 8 bytes each
 			spec := ArraySpec{
 				Name:      "test_array",
 				Size:      int64(totalK * 8),
@@ -178,7 +172,7 @@ func TestGetArrayLogicalSize_MultiplePartitions(t *testing.T) {
 				t.Errorf("GetArrayLogicalSize failed: %v", err)
 			}
 
-			// Mathematical property: size = sum(K[i]) * elementsPerValue
+			// Mathematical property: size = total bytes / element size
 			if size != totalK {
 				t.Errorf("Expected size %d, got %d", totalK, size)
 			}
