@@ -174,11 +174,6 @@ func testRun(t *testing.T) {
 	}
 	defer argKernel.Free()
 
-	// Set run dimensions
-	outerDims := gocca.OCCADim{X: 1, Y: 1, Z: 1}
-	innerDims := gocca.OCCADim{X: 1, Y: 1, Z: 1}
-	argKernel.SetRunDims(outerDims, innerDims)
-
 	// Create memory
 	value := int32(1)
 	mem := gocca.Malloc(4, unsafe.Pointer(&value), nil)
