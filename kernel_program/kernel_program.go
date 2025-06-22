@@ -480,22 +480,6 @@ func (kp *KernelProgram) RunKernel(name string, args ...interface{}) error {
 		return fmt.Errorf("kernel %s not found", name)
 	}
 
-	// Configure for partition-parallel execution
-	outerDims := gocca.OCCADim{
-		X: uint64(kp.NumPartitions),
-		Y: 1,
-		Z: 1,
-	}
-
-	// Inner dimensions set to KpartMax for element parallelism
-	innerDims := gocca.OCCADim{
-		X: uint64(kp.KpartMax),
-		Y: 1,
-		Z: 1,
-	}
-
-	kernel.SetRunDims(outerDims, innerDims)
-
 	// Expand args to include renamed arrays
 	expandedArgs := kp.expandKernelArgs(args)
 
