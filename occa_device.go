@@ -34,11 +34,15 @@ void freeJson(occaJson j) {
 import "C"
 import (
 	"errors"
+	"runtime"
+	"strings"
+	"sync"
 	"unsafe"
 )
 
 type OCCADevice struct {
-	device C.occaDevice
+	device       C.occaDevice
+	threadLocked bool
 }
 
 type OCCAStream struct {
@@ -61,10 +65,26 @@ type OCCADtype struct {
 	dtype C.occaDtype
 }
 
+// Global mutex to protect thread locking state
+var deviceMutex sync.Mutex
+
 // Device creation functions
 
 // CreateDevice creates a new OCCA device from JSON properties (direct C API equivalent)
 func CreateDevice(props *OCCAJson) (*OCCADevice, error) {
+	// Check if this is a CUDA device by examining the mode property
+	isCUDA := false
+	if props != nil && props.ObjectHas("mode") {
+		modeValue := props.ObjectGet("mode", nil)
+		if modeStr, ok := modeValue.(string); ok {
+			isCUDA = strings.Contains(modeStr, "CUDA") || strings.Contains(modeStr, "cuda")
+		}
+	}
+
+	if isCUDA {
+		runtime.LockOSThread()
+	}
+
 	var propsArg C.occaJson
 	if props != nil {
 		propsArg = props.json
@@ -74,36 +94,69 @@ func CreateDevice(props *OCCAJson) (*OCCADevice, error) {
 
 	device := C.occaCreateDevice(propsArg)
 	if !C.occaDeviceIsInitialized(device) {
+		// Unlock thread if device creation failed
+		if isCUDA {
+			runtime.UnlockOSThread()
+		}
 		return nil, errors.New("failed to initialize device")
 	}
 
-	return &OCCADevice{device: device}, nil
+	return &OCCADevice{
+		device:       device,
+		threadLocked: isCUDA,
+	}, nil
 }
 
 // NewDevice creates a new OCCA device with the given properties (string convenience method)
 func NewDevice(deviceInfo string) (*OCCADevice, error) {
+	// Check if this is a CUDA device and lock thread if needed
+	isCUDA := strings.Contains(deviceInfo, "CUDA") || strings.Contains(deviceInfo, "cuda")
+	if isCUDA {
+		runtime.LockOSThread()
+	}
+
 	cDeviceInfo := C.CString(deviceInfo)
 	defer C.free(unsafe.Pointer(cDeviceInfo))
 
 	device := C.createDeviceHelper(cDeviceInfo)
 	if !C.occaDeviceIsInitialized(device) {
+		// Unlock thread if device creation failed
+		if isCUDA {
+			runtime.UnlockOSThread()
+		}
 		return nil, errors.New("failed to initialize device")
 	}
 
-	return &OCCADevice{device: device}, nil
+	return &OCCADevice{
+		device:       device,
+		threadLocked: isCUDA,
+	}, nil
 }
 
 // CreateDeviceFromString creates a device from a string configuration
 func CreateDeviceFromString(info string) (*OCCADevice, error) {
+	// Check if this is a CUDA device and lock thread if needed
+	isCUDA := strings.Contains(info, "CUDA") || strings.Contains(info, "cuda")
+	if isCUDA {
+		runtime.LockOSThread()
+	}
+
 	cInfo := C.CString(info)
 	defer C.free(unsafe.Pointer(cInfo))
 
 	device := C.occaCreateDeviceFromString(cInfo)
 	if !C.occaDeviceIsInitialized(device) {
+		// Unlock thread if device creation failed
+		if isCUDA {
+			runtime.UnlockOSThread()
+		}
 		return nil, errors.New("failed to initialize device from string")
 	}
 
-	return &OCCADevice{device: device}, nil
+	return &OCCADevice{
+		device:       device,
+		threadLocked: isCUDA,
+	}, nil
 }
 
 // Device property methods
@@ -388,9 +441,25 @@ func (d *OCCADevice) CreateMemoryPool(props *OCCAJson) *OCCAMemoryPool {
 
 // Free methods
 
-// Free frees the device
+// Free frees the device and unlocks the thread if it's a CUDA device
 func (d *OCCADevice) Free() {
+	deviceMutex.Lock()
+	defer deviceMutex.Unlock()
+
 	C.freeDevice(d.device)
+
+	// Unlock thread if this device locked it
+	if d.threadLocked {
+		runtime.UnlockOSThread()
+		d.threadLocked = false
+	}
+}
+
+// IsThreadLocked returns whether this device has locked the OS thread
+func (d *OCCADevice) IsThreadLocked() bool {
+	deviceMutex.Lock()
+	defer deviceMutex.Unlock()
+	return d.threadLocked
 }
 
 // Free frees the stream
