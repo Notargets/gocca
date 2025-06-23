@@ -12,24 +12,27 @@ import (
 
 // ============================================================================
 // Performance Test Suite for OCCA KernelProgram
-// Based on Performance Testing Principles document
+// Focused on meaningful performance phenomena with realistic problem sizes
 //
 // CUDA CONSTRAINT: All K values must be <= 1024 due to @inner thread limit
+//
+// TESTING STRATEGY:
+// - @inner dimension: Controls work per partition (K[part]), limited to 1024 for CUDA
+// - @outer dimension: Controls number of partitions, used for scaling tests
+// - Realistic element counts: 25K-250K elements
+// - Realistic partition counts: 256+ for optimal CUDA @outer utilization
+//
+// NP VALUES (Number of volume points for tetrahedral elements):
+// - NP = (P+1)(P+2)(P+3)/6 where P is the polynomial order
+// - NP = 10 for P=2 (low order method)
+// - NP = 56 for P=5 (high order method)
 // ============================================================================
 
-// Hardware cache sizes (typical x86_64)
 const (
-	L1_SIZE = 32 * 1024        // 32 KB per core
-	L2_SIZE = 512 * 1024       // 512 KB per core
-	L3_SIZE = 16 * 1024 * 1024 // 16 MB shared
-
 	CACHE_LINE  = 64 // 64 bytes
 	DOUBLE_SIZE = 8  // 8 bytes per float64
 
-	MIN_TEST_TIME = 100 * time.Millisecond // Minimum test duration
-	MAX_TEST_TIME = 2 * time.Second        // Maximum test duration
-
-	// CUDA constraint
+	MIN_TEST_TIME  = 100 * time.Millisecond // Minimum test duration
 	MAX_CUDA_INNER = 1024
 )
 
@@ -47,12 +50,6 @@ func computeIterations(expectedTimePerIter time.Duration) int {
 		return 1000
 	}
 	return iterations
-}
-
-// calculateWorkingSet computes memory footprint for given K and np
-func calculateWorkingSet(K, np int) int64 {
-	// Input array + output array
-	return int64(K * np * DOUBLE_SIZE * 2)
 }
 
 // createTestDevice creates a device for testing, preferring parallel backends
@@ -98,11 +95,11 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 	})
 	defer kp.Free()
 
-	// Create differentiation matrix
+	// Add static matrix
 	Dr := createTestMatrix(np, np)
 	kp.AddStaticMatrix("Dr", Dr)
 
-	// Allocate arrays with cache line alignment for better performance
+	// Allocate arrays
 	specs := []ArraySpec{
 		{
 			Name:      "U",
@@ -123,7 +120,7 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 		b.Fatalf("Failed to allocate arrays: %v", err)
 	}
 
-	// Initialize input
+	// Initialize input data
 	U := make([]float64, totalNodes)
 	for i := range U {
 		U[i] = 1.0 + float64(i%100)*0.01
@@ -137,7 +134,7 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 		b.Fatalf("Failed to build kernel: %v", err)
 	}
 
-	// Warm up (5 iterations)
+	// Warm up
 	for i := 0; i < 5; i++ {
 		err = kp.RunKernel("matmul", "U", "V")
 		if err != nil {
@@ -146,16 +143,15 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 	}
 	device.Finish()
 
-	// Estimate time per iteration
+	// Time one execution to estimate iterations needed
 	start := time.Now()
 	kp.RunKernel("matmul", "U", "V")
 	device.Finish()
 	estimatedTime := time.Since(start)
 
-	// Calculate iterations needed
 	iterations := computeIterations(estimatedTime)
 
-	// Actual benchmark
+	// Run benchmark
 	start = time.Now()
 	for i := 0; i < iterations; i++ {
 		err = kp.RunKernel("matmul", "U", "V")
@@ -165,14 +161,16 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 	}
 	device.Finish()
 	totalTime := time.Since(start)
+
 	avgTime := totalTime / time.Duration(iterations)
 
 	// Calculate metrics
-	flops := float64(2 * totalElements * np * np) // Matrix multiply ops
-	gflops := flops / float64(avgTime.Nanoseconds())
+	ops := float64(totalElements * np * np * 2) // 2 ops per multiply-add
+	gflops := (ops / 1e9) / avgTime.Seconds()
 
-	bytesAccessed := float64(2 * totalNodes * DOUBLE_SIZE) // Read U, Write V
-	bandwidth := bytesAccessed / float64(avgTime.Nanoseconds())
+	// Memory bandwidth: read U, read Dr (cached), write V
+	bytesTransferred := int64(totalNodes * DOUBLE_SIZE * 2) // read U, write V
+	bandwidth := float64(bytesTransferred) / avgTime.Seconds() / 1e9
 
 	return benchResult{
 		avgTime:    avgTime,
@@ -233,243 +231,274 @@ func sumArray(arr []int) int {
 	return sum
 }
 
-func formatBytes(bytes int64) string {
-	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
+// generateUniformK creates a K array with uniform values
+func generateUniformK(numPartitions, elementsPerPartition int) []int {
+	K := make([]int, numPartitions)
+	for i := range K {
+		K[i] = elementsPerPartition
 	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+	return K
 }
 
-// BenchmarkPerf_Serial_Baseline establishes minimal serial performance baseline
-func BenchmarkPerf_Serial_Baseline(b *testing.B) {
-	device, err := gocca.NewDevice(`{"mode": "Serial"}`)
-	if err != nil {
-		b.Skip("Serial device not available")
-	}
-	defer device.Free()
+// ============================================================================
+// ESSENTIAL PERFORMANCE TESTS
+// ============================================================================
 
-	// Small size for fast execution
-	K := 256
-	np := 10
-
-	result := runMatmulBenchmark(b, device, []int{K}, np, "Serial_Baseline")
-
-	b.Logf("Serial Baseline: K=%d, np=%d, time=%v, GFLOPS=%.2f",
-		K, np, result.avgTime, result.gflops)
-
-	// Verify test completed quickly
-	if result.totalTime > 500*time.Millisecond {
-		b.Logf("Warning: Serial test took %v (target <500ms)", result.totalTime)
-	}
-}
-
-// BenchmarkPerf_CUDA_Simple tests CUDA performance in isolation
-func BenchmarkPerf_CUDA_Simple(b *testing.B) {
-	device, err := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
-	if err != nil {
-		b.Skip("CUDA device not available")
-	}
-	defer device.Free()
-
-	np := 10
-	K := []int{1024} // Maximum allowed for CUDA @inner
-
-	// Run the benchmark
-	result := runMatmulBenchmark(b, device, K, np, "CUDA")
-
-	b.Logf("CUDA: K=%d, np=%d, time=%v, GFLOPS=%.2f", K[0], np, result.avgTime, result.gflops)
-}
-
-// BenchmarkPerf_CUDA_SinglePartition tests CUDA with single partition first
-// Following Unit Testing Principle: Start with fundamentals
-func BenchmarkPerf_CUDA_SinglePartition(b *testing.B) {
-	device, err := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
-	if err != nil {
-		b.Skip("CUDA device not available")
-	}
-	defer device.Free()
-
-	// Test with single partition, respecting CUDA limit
-	K := 1000 // < 1024
-	np := 32
-
-	result := runMatmulBenchmark(b, device, []int{K}, np, "CUDA_SinglePartition")
-
-	b.Logf("CUDA Single Partition: K=%d, np=%d, time=%v, GFLOPS=%.2f",
-		K, np, result.avgTime, result.gflops)
-}
-
-// BenchmarkPerf_CUDA_IncrementalPartitions tests CUDA with increasing partitions
-// Following Unit Testing Principle: Incremental validation
-func BenchmarkPerf_CUDA_IncrementalPartitions(b *testing.B) {
-	device, err := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
-	if err != nil {
-		b.Skip("CUDA device not available")
-	}
-	defer device.Free()
-
-	np := 32
-	baseK := 512 // Safe value for CUDA
-
-	b.Log("\nCUDA Incremental Partition Test:")
-	b.Log("Partitions | K per part | Status")
-	b.Log("-----------|------------|--------")
-
-	// Test incrementally: 1, 2, 3 partitions (CUDA has issues with 4+)
-	for numParts := 1; numParts <= 3; numParts++ {
-		K := make([]int, numParts)
-		for i := range K {
-			K[i] = baseK
-		}
-
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					b.Logf("%10d | %10d | FAILED: %v", numParts, baseK, r)
-				}
-			}()
-
-			// Don't use runMatmulBenchmark for CUDA to avoid resource issues
-			// Inline the logic and ensure proper cleanup
-			totalElements := sumArray(K)
-			totalNodes := totalElements * np
-
-			kp := NewKernelProgram(device, Config{
-				K:         K,
-				FloatType: Float64,
-			})
-
-			Dr := createTestMatrix(np, np)
-			kp.AddStaticMatrix("Dr", Dr)
-
-			specs := []ArraySpec{
-				{
-					Name:      "U",
-					Size:      int64(totalNodes * DOUBLE_SIZE),
-					DataType:  Float64,
-					Alignment: CacheLineAlign,
-				},
-				{
-					Name:      "V",
-					Size:      int64(totalNodes * DOUBLE_SIZE),
-					DataType:  Float64,
-					Alignment: CacheLineAlign,
-				},
-			}
-
-			err := kp.AllocateArrays(specs)
-			if err != nil {
-				b.Fatalf("Failed to allocate arrays: %v", err)
-			}
-
-			U := make([]float64, totalNodes)
-			for i := range U {
-				U[i] = 1.0 + float64(i%100)*0.01
-			}
-			kp.GetMemory("U").CopyFrom(unsafe.Pointer(&U[0]), int64(totalNodes*DOUBLE_SIZE))
-
-			kernelSource := buildMatmulKernel(np)
-			_, err = kp.BuildKernel(kernelSource, "matmul")
-			if err != nil {
-				b.Fatalf("Failed to build kernel: %v", err)
-			}
-
-			// Warm up
-			for i := 0; i < 5; i++ {
-				err = kp.RunKernel("matmul", "U", "V")
-				if err != nil {
-					b.Fatalf("Kernel execution failed: %v", err)
-				}
-			}
-			device.Finish()
-
-			// Time one execution
-			start := time.Now()
-			kp.RunKernel("matmul", "U", "V")
-			device.Finish()
-			avgTime := time.Since(start)
-
-			b.Logf("%10d | %10d | OK: %v", numParts, baseK, avgTime)
-
-			// Explicitly free resources before next iteration
-			kp.Free()
-
-			// Ensure all CUDA operations complete before next iteration
-			device.Finish()
-		}()
-	}
-}
-
-// BenchmarkPerf_CacheEffects validates performance across cache boundaries
-func BenchmarkPerf_CacheEffects(b *testing.B) {
-	device := createTestDevice()
-	defer device.Free()
-
-	np := 10
-
-	// Working set sizes that cross cache boundaries
-	// Adjusted to respect CUDA limit
-	testCases := []struct {
-		name        string
-		K           int
-		expectedFit string
+// BenchmarkPerf_BasicFunctionality tests single and multi-partition baseline
+// This establishes that the system works with realistic element counts
+func BenchmarkPerf_BasicFunctionality(b *testing.B) {
+	configs := []struct {
+		name   string
+		device string
 	}{
-		{"L1_Fit", min(L1_SIZE/(2*np*DOUBLE_SIZE), MAX_CUDA_INNER), "L1"},
-		{"L2_Fit", min(L2_SIZE/(2*np*DOUBLE_SIZE), MAX_CUDA_INNER), "L2"},
-		{"L3_Fit", min(L3_SIZE/(2*np*DOUBLE_SIZE), MAX_CUDA_INNER), "L3"},
-		{"RAM_Fit", MAX_CUDA_INNER, "RAM"}, // Capped at CUDA limit
+		{"Serial", `{"mode": "Serial"}`},
+		{"OpenMP", `{"mode": "OpenMP"}`},
+		{"CUDA", `{"mode": "CUDA", "device_id": 0}`},
 	}
 
-	b.Log("\nCache Effects Analysis:")
-	b.Log("Size      | K   | Working Set | Cache | Time/Iter | Bandwidth")
-	b.Log("----------|-----|-------------|-------|-----------|----------")
+	for _, config := range configs {
+		b.Run(config.name, func(b *testing.B) {
+			device, err := gocca.NewDevice(config.device)
+			if err != nil {
+				b.Skip("Device not available")
+			}
+			defer device.Free()
 
-	for _, tc := range testCases {
-		result := runMatmulBenchmark(b, device, []int{tc.K}, np, tc.name)
-		workingSet := calculateWorkingSet(tc.K, np)
+			// Test both low and high order methods
+			k256 := generateUniformK(256, 400) // Pre-generate for use in test case
 
-		b.Logf("%-9s | %4d | %11s | %5s | %9v | %.2f GB/s",
-			tc.name,
-			tc.K,
-			formatBytes(workingSet),
-			tc.expectedFit,
-			result.avgTime,
-			result.bandwidth)
+			testCases := []struct {
+				name string
+				K    []int
+				np   int
+			}{
+				{"SinglePart_P2", []int{1000}, 10},    // 1 partition, 1000 elements, P=2
+				{"MultiPart_P2", []int{500, 500}, 10}, // 2 partitions, 1000 elements total, P=2
+				{"SinglePart_P5", []int{800}, 56},     // 1 partition, 800 elements, P=5
+				{"256Part_P5", k256, 56},              // 256 partitions, 400 each, P=5
+			}
+
+			for _, tc := range testCases {
+				result := runMatmulBenchmark(b, device, tc.K, tc.np, tc.name)
+
+				totalElements := sumArray(tc.K)
+				b.Logf("%s %s: %d partitions, %d total elements, np=%d, time=%v, GFLOPS=%.2f",
+					config.name, tc.name, len(tc.K), totalElements, tc.np,
+					result.avgTime, result.gflops)
+			}
+		})
+	}
+}
+
+// BenchmarkPerf_WeakScaling tests scaling with proportional work increase
+// This is a fundamental test of parallel efficiency - increases @outer dimension
+func BenchmarkPerf_WeakScaling(b *testing.B) {
+	configs := []struct {
+		name   string
+		device string
+	}{
+		{"OpenMP", `{"mode": "OpenMP"}`},
+		{"CUDA", `{"mode": "CUDA", "device_id": 0}`},
+	}
+
+	for _, config := range configs {
+		b.Run(config.name, func(b *testing.B) {
+			device, err := gocca.NewDevice(config.device)
+			if err != nil {
+				b.Skip("Device not available")
+			}
+			defer device.Free()
+
+			np := 56 // P=5: (6)(7)(8)/6 = 56 volume points
+
+			// Realistic weak scaling: start with 256 partitions, scale up
+			// Each partition handles ~400 elements (well within CUDA limit)
+			elementsPerPartition := 400
+
+			b.Logf("\n%s Weak Scaling (realistic element counts):", config.name)
+			b.Log("Partitions | Elements/Part | Total Elements | Time/Iter | Efficiency")
+			b.Log("-----------|---------------|----------------|-----------|------------")
+
+			var baselineTime time.Duration
+
+			// Test with realistic partition counts for CUDA @outer optimization
+			for _, numParts := range []int{256, 512, 1024, 2048} {
+				K := make([]int, numParts)
+				for i := range K {
+					K[i] = elementsPerPartition
+				}
+
+				totalElements := numParts * elementsPerPartition
+
+				result := runMatmulBenchmark(b, device, K, np, fmt.Sprintf("%d_parts", numParts))
+
+				if numParts == 256 {
+					baselineTime = result.avgTime
+				}
+
+				efficiency := float64(baselineTime) / float64(result.avgTime) * 100
+
+				b.Logf("%10d | %13d | %14d | %9v | %9.1f%%",
+					numParts, elementsPerPartition, totalElements, result.avgTime, efficiency)
+			}
+		})
+	}
+}
+
+// BenchmarkPerf_StrongScaling tests fixed total work divided among partitions
+// This measures parallel speedup by varying @outer dimension
+func BenchmarkPerf_StrongScaling(b *testing.B) {
+	configs := []struct {
+		name   string
+		device string
+	}{
+		{"OpenMP", `{"mode": "OpenMP"}`},
+		{"CUDA", `{"mode": "CUDA", "device_id": 0}`},
+	}
+
+	for _, config := range configs {
+		b.Run(config.name, func(b *testing.B) {
+			device, err := gocca.NewDevice(config.device)
+			if err != nil {
+				b.Skip("Device not available")
+			}
+			defer device.Free()
+
+			np := 56 // P=5: (6)(7)(8)/6 = 56 volume points
+
+			// Realistic total element count
+			totalElements := 102400 // 100K elements, divisible by 128, 256, 512, 1024
+
+			b.Logf("\n%s Strong Scaling (fixed %d elements):", config.name, totalElements)
+			b.Log("Partitions | Elements/Part | Time/Iter | Speedup | Efficiency")
+			b.Log("-----------|---------------|-----------|---------|------------")
+
+			var baselineTime time.Duration
+
+			// Test with realistic partition counts for CUDA optimization
+			for _, numParts := range []int{128, 256, 512, 1024} {
+				elementsPerPart := totalElements / numParts
+
+				// Check CUDA limit
+				if elementsPerPart > MAX_CUDA_INNER {
+					b.Logf("%10d | %13d | SKIPPED: exceeds CUDA @inner limit",
+						numParts, elementsPerPart)
+					continue
+				}
+
+				K := make([]int, numParts)
+				for i := range K {
+					K[i] = elementsPerPart
+				}
+
+				result := runMatmulBenchmark(b, device, K, np, fmt.Sprintf("%d_parts", numParts))
+
+				if numParts == 128 {
+					baselineTime = result.avgTime
+				}
+
+				speedup := float64(baselineTime) / float64(result.avgTime)
+				// Efficiency is speedup divided by the relative increase in resources
+				// Using 128 as baseline, so 256 has 2x resources, 512 has 4x, etc.
+				resourceMultiplier := float64(numParts) / 128.0
+				efficiency := speedup / resourceMultiplier * 100
+
+				b.Logf("%10d | %13d | %9v | %7.2fx | %9.1f%%",
+					numParts, elementsPerPart, result.avgTime, speedup, efficiency)
+			}
+		})
 	}
 }
 
 // BenchmarkPerf_LoadBalance tests impact of uneven work distribution
+// This demonstrates a real performance issue with realistic element counts
 func BenchmarkPerf_LoadBalance(b *testing.B) {
 	device := createTestDevice()
 	defer device.Free()
 
-	np := 10
+	np := 10             // P=2: (3)(4)(5)/6 = 10 volume points
+	numPartitions := 256 // Realistic partition count
+
+	// Test cases with ~100K total elements distributed differently
+	avgElementsPerPart := 400
+	totalElements := numPartitions * avgElementsPerPart
+	_ = totalElements
 
 	testCases := []struct {
-		name string
-		K    []int
+		name      string
+		generateK func() []int
 	}{
-		{"Balanced", []int{512, 512, 512, 512}},
-		{"Unbalanced_Mild", []int{400, 500, 600, 524}},
-		{"Unbalanced_Severe", []int{100, 200, 300, 1024}},
-		{"SingleHeavy", []int{100, 100, 100, 1021}},
+		{
+			name: "Balanced",
+			generateK: func() []int {
+				K := make([]int, numPartitions)
+				for i := range K {
+					K[i] = avgElementsPerPart
+				}
+				return K
+			},
+		},
+		{
+			name: "Mild_Imbalance",
+			generateK: func() []int {
+				K := make([]int, numPartitions)
+				// Most partitions get average, but some get ±20%
+				for i := range K {
+					if i%4 == 0 {
+						K[i] = avgElementsPerPart + 80 // +20%
+					} else if i%4 == 1 {
+						K[i] = avgElementsPerPart - 80 // -20%
+					} else {
+						K[i] = avgElementsPerPart
+					}
+				}
+				return K
+			},
+		},
+		{
+			name: "Severe_Imbalance",
+			generateK: func() []int {
+				K := make([]int, numPartitions)
+				// Half partitions get 200, half get 600 (3x difference)
+				for i := range K {
+					if i < numPartitions/2 {
+						K[i] = 200
+					} else {
+						K[i] = 600
+					}
+				}
+				return K
+			},
+		},
+		{
+			name: "Hotspot",
+			generateK: func() []int {
+				K := make([]int, numPartitions)
+				// Most get 350, but 10% get 1000 (near CUDA limit)
+				for i := range K {
+					if i < numPartitions/10 {
+						K[i] = 1000
+					} else {
+						K[i] = 350
+					}
+				}
+				return K
+			},
+		},
 	}
 
-	b.Log("\nLoad Balance Analysis:")
-	b.Log("Configuration    | Max-Min | Imbalance | Time/Iter | Efficiency")
-	b.Log("-----------------|---------|-----------|-----------|------------")
+	b.Log("\nLoad Balance Analysis (256 partitions, ~100K elements):")
+	b.Log("Configuration  | Min K | Max K | Imbalance | Time/Iter | Performance Loss")
+	b.Log("---------------|-------|-------|-----------|-----------|------------------")
 
 	var balancedTime time.Duration
 
 	for i, tc := range testCases {
-		minK, maxK := tc.K[0], tc.K[0]
-		for _, k := range tc.K {
+		K := tc.generateK()
+
+		// Calculate min/max
+		minK, maxK := K[0], K[0]
+		for _, k := range K {
 			if k < minK {
 				minK = k
 			}
@@ -479,192 +508,77 @@ func BenchmarkPerf_LoadBalance(b *testing.B) {
 		}
 
 		imbalance := float64(maxK-minK) / float64(maxK) * 100
-
-		result := runMatmulBenchmark(b, device, tc.K, np, tc.name)
+		result := runMatmulBenchmark(b, device, K, np, tc.name)
 
 		if i == 0 {
 			balancedTime = result.avgTime
 		}
 
-		efficiency := float64(balancedTime) / float64(result.avgTime) * 100
+		perfLoss := (float64(result.avgTime) - float64(balancedTime)) / float64(balancedTime) * 100
 
-		b.Logf("%-16s | %7d | %8.1f%% | %9v | %9.1f%%",
-			tc.name, maxK-minK, imbalance, result.avgTime, efficiency)
-
-		// Warn if imbalance causes significant performance degradation
-		if efficiency < 90 && imbalance > 20 {
-			b.Logf("  Warning: Load imbalance causing >10%% performance loss (%.1f%%)", 100-efficiency)
-		}
+		b.Logf("%-14s | %5d | %5d | %8.1f%% | %9v | %8.1f%%",
+			tc.name, minK, maxK, imbalance, result.avgTime, perfLoss)
 	}
 }
 
-// BenchmarkPerf_TimingStability measures timing stability across multiple runs
-func BenchmarkPerf_TimingStability(b *testing.B) {
-	device := createTestDevice()
+// BenchmarkPerf_CUDA_RealisticScaling tests CUDA with realistic element/partition counts
+// This validates CUDA performance with production-scale problems
+func BenchmarkPerf_CUDA_RealisticScaling(b *testing.B) {
+	device, err := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
+	if err != nil {
+		b.Skip("CUDA device not available")
+	}
 	defer device.Free()
 
-	np := 10
-	K := []int{1024} // Use CUDA limit
-	numRuns := 10
+	np := 56 // P=5: (6)(7)(8)/6 = 56 volume points
 
-	times := make([]time.Duration, numRuns)
-	var sum, sumSq float64
+	b.Log("\nCUDA Realistic Problem Sizes:")
+	b.Log("Elements   | Partitions | Elem/Part | Time/Iter | GFLOPS | Bandwidth")
+	b.Log("-----------|------------|-----------|-----------|--------|----------")
 
-	b.Log("\nTiming Stability Analysis:")
-	b.Log("Run | Time       | Delta from mean")
-	b.Log("----|------------|----------------")
-
-	// Collect timing samples
-	for i := 0; i < numRuns; i++ {
-		result := runMatmulBenchmark(b, device, K, np, fmt.Sprintf("run_%d", i))
-		times[i] = result.avgTime
-		ns := float64(result.avgTime.Nanoseconds())
-		sum += ns
-		sumSq += ns * ns
-	}
-
-	// Calculate statistics
-	mean := sum / float64(numRuns)
-	variance := (sumSq / float64(numRuns)) - (mean * mean)
-	stddev := 0.0
-	if variance > 0 {
-		stddev = variance // sqrt would be actual stddev
-	}
-	coeffVar := (stddev / mean) * 100
-
-	// Display results
-	for i, tt := range times {
-		delta := (float64(tt.Nanoseconds()) - mean) / mean * 100
-		b.Logf("%3d | %10v | %+6.1f%%", i+1, tt, delta)
-	}
-
-	b.Logf("\nMean: %v, CoV: %.1f%%", time.Duration(mean), coeffVar)
-
-	// Warning if high variability
-	if coeffVar > 10 {
-		b.Logf("Warning: High timing variability (CoV=%.1f%%). May need more iterations or warmup.",
-			coeffVar)
-	}
-}
-
-// BenchmarkPerf_MemoryPressure tests behavior under memory pressure
-func BenchmarkPerf_MemoryPressure(b *testing.B) {
-	device := createTestDevice()
-	defer device.Free()
-
-	np := 10
-
-	// Use smaller K values to stay within CUDA limits
+	// Test realistic problem sizes
 	testCases := []struct {
-		name      string
-		numArrays int
-		K         int
-		memoryMB  int
+		totalElements int
+		partitions    int
 	}{
-		{"Light_1MB", 2, 512, 1},
-		{"Medium_10MB", 2, 1024, 10},
-		{"Heavy_50MB", 4, 1024, 50},
+		{25600, 256},   // 25K elements, 100 per partition
+		{51200, 256},   // 50K elements, 200 per partition
+		{102400, 256},  // 100K elements, 400 per partition
+		{204800, 256},  // 200K elements, 800 per partition
+		{256000, 256},  // 250K elements, 1000 per partition
+		{256000, 512},  // 250K elements, 500 per partition
+		{256000, 1024}, // 250K elements, 250 per partition
 	}
-
-	b.Log("\nMemory Pressure Analysis:")
-	b.Log("Pressure    | Arrays | K    | Memory | Time/Iter | Bandwidth")
-	b.Log("------------|--------|------|--------|-----------|----------")
 
 	for _, tc := range testCases {
-		// Skip if too large for available memory
-		totalBytes := int64(tc.numArrays * tc.K * np * DOUBLE_SIZE)
-		actualMB := int(totalBytes / (1024 * 1024))
+		elementsPerPart := tc.totalElements / tc.partitions
 
-		result := runMatmulBenchmark(b, device, []int{tc.K}, np, tc.name)
-
-		b.Logf("%-11s | %6d | %4d | %6dMB | %9v | %7.2f GB/s",
-			tc.name, tc.numArrays, tc.K, actualMB, result.avgTime, result.bandwidth)
-
-		// Warn if bandwidth drops significantly
-		if result.bandwidth < 10 {
-			b.Logf("  Warning: Low bandwidth suggests memory pressure or small problem size.")
-		}
-	}
-}
-
-// BenchmarkPerf_MixedSizes tests performance with heterogeneous partition sizes
-func BenchmarkPerf_MixedSizes(b *testing.B) {
-	device := createTestDevice()
-	defer device.Free()
-
-	np := 10
-
-	// All K values must be <= 1024 for CUDA
-	testCases := []struct {
-		name string
-		K    []int
-	}{
-		{"Uniform_Small", []int{256, 256, 256, 256}},
-		{"Uniform_Large", []int{1024, 1024, 1024, 1024}},
-		{"Ascending", []int{256, 512, 768, 1024}},
-		{"Descending", []int{1024, 768, 512, 256}},
-		{"Mixed", []int{1024, 256, 768, 512}},
-	}
-
-	b.Log("\nMixed Partition Sizes:")
-	b.Log("Configuration | Total Elems | Time/Iter | GFLOPS")
-	b.Log("--------------|-------------|-----------|--------")
-
-	for _, tc := range testCases {
-		totalElems := 0
-		for _, k := range tc.K {
-			totalElems += k
+		// Skip if exceeds CUDA limit
+		if elementsPerPart > MAX_CUDA_INNER {
+			b.Logf("%10d | %10d | %9d | SKIPPED: exceeds CUDA limit",
+				tc.totalElements, tc.partitions, elementsPerPart)
+			continue
 		}
 
-		result := runMatmulBenchmark(b, device, tc.K, np, tc.name)
-
-		b.Logf("%-13s | %11d | %9v | %7.2f",
-			tc.name, totalElems, result.avgTime, result.gflops)
-	}
-}
-
-// BenchmarkPerf_PowerOfTwo tests performance with power-of-2 vs non-power-of-2 sizes
-func BenchmarkPerf_PowerOfTwo(b *testing.B) {
-	device := createTestDevice()
-	defer device.Free()
-
-	np := 16 // Power of 2
-
-	// All values must be <= 1024 for CUDA
-	testCases := []struct {
-		name string
-		K    int
-	}{
-		{"Pow2_256", 256},
-		{"NonPow2_255", 255},
-		{"NonPow2_257", 257},
-		{"Pow2_512", 512},
-		{"NonPow2_511", 511},
-		{"NonPow2_513", 513},
-		{"Pow2_1024", 1024},
-		{"NonPow2_1023", 1023},
-	}
-
-	b.Log("\nPower-of-2 Effects:")
-	b.Log("Size Type     | Elements | Time/Iter | GFLOPS | Delta")
-	b.Log("--------------|----------|-----------|--------|-------")
-
-	var pow2Time time.Duration
-	baseIdx := 0
-
-	for i, tc := range testCases {
-		result := runMatmulBenchmark(b, device, []int{tc.K}, np, tc.name)
-
-		delta := ""
-		if i%3 == 0 {
-			pow2Time = result.avgTime
-			baseIdx = i
-		} else if i-baseIdx <= 2 {
-			diff := float64(result.avgTime-pow2Time) / float64(pow2Time) * 100
-			delta = fmt.Sprintf("%+.1f%%", diff)
+		K := make([]int, tc.partitions)
+		for i := range K {
+			K[i] = elementsPerPart
 		}
 
-		b.Logf("%-13s | %8d | %9v | %6.2f | %6s",
-			tc.name, tc.K, result.avgTime, result.gflops, delta)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					b.Logf("%10d | %10d | %9d | FAILED: %v",
+						tc.totalElements, tc.partitions, elementsPerPart, r)
+				}
+			}()
+
+			result := runMatmulBenchmark(b, device, K, np,
+				fmt.Sprintf("%dK_%dparts", tc.totalElements/1000, tc.partitions))
+
+			b.Logf("%10d | %10d | %9d | %9v | %6.2f | %7.2f GB/s",
+				tc.totalElements, tc.partitions, elementsPerPart,
+				result.avgTime, result.gflops, result.bandwidth)
+		}()
 	}
 }
