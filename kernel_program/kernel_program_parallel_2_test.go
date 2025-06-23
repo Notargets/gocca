@@ -148,7 +148,7 @@ func BenchmarkPerf_StrongScaling(b *testing.B) {
 			defer device.Free()
 
 			np := 32
-			totalWork := 4096 // Reduced from 200000, divisible by 1,2,4,8
+			totalWork := 1024 // Reduced from 200000, divisible by 1,2,4,8
 
 			b.Logf("\n%s Strong Scaling (constant total work):", config.name)
 			b.Log("Partitions | Work/Part | Time/Iter | Speedup | Efficiency")
