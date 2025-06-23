@@ -24,10 +24,8 @@ import (
 //
 // IMPORTANT NOTE ON SCALING:
 // These tests measure performance with FIXED hardware resources (threads/SMs).
-// Traditional scaling efficiency assumes proportional resource increase, which
-// doesn't apply here. We measure:
-// - Strong scaling: How partition size affects performance (smaller may be better)
-// - Weak scaling: Overhead of managing more partitions
+// - Strong scaling: How partition granularity affects performance (no "speedup")
+// - Weak scaling: Efficiency of handling proportionally more work
 //
 // COMPUTE KERNEL:
 // - Performs 3 sequential Dr matrix multiplies per iteration
@@ -189,16 +187,20 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 	// Calculate metrics
 	// We do 3 Dr matrix multiplies × 3 iterations = 9 matrix multiplies total
 	// Each matrix multiply is np × np × K operations (2 ops per multiply-add)
-	// This provides good arithmetic intensity while keeping test runtime reasonable
 	matmulIterations := 3 * 3                                      // 3 Dr operations per iteration, 3 iterations
 	ops := float64(totalElements * np * np * 2 * matmulIterations) // 2 ops per multiply-add
 	gflops := (ops / 1e9) / avgTime.Seconds()
 
-	// Memory bandwidth: More complex with 3 arrays and data reuse
-	// With 10 iterations, data should be reused from cache after first iteration
-	// Effective bandwidth is lower than theoretical due to compute intensity
-	bytesTransferred := int64(totalNodes * DOUBLE_SIZE * 3 * 2) // 3 arrays, read+write
-	bandwidth := float64(bytesTransferred) / avgTime.Seconds() / 1e9
+	// Memory bandwidth calculation - improved to account for actual access patterns
+	// Each iteration moves:
+	// - Dr matrix reads: np×np elements × numPartitions × DOUBLE_SIZE
+	// - Vector reads/writes: 3 arrays × totalNodes × DOUBLE_SIZE × 2 (read+write)
+	// However, Dr is cached after first use, and vectors have reuse within iterations
+	drBytes := int64(np * np * len(K) * DOUBLE_SIZE)       // Dr reads per iteration
+	vectorBytes := int64(totalNodes * DOUBLE_SIZE * 3 * 2) // 3 arrays, read+write
+	// Estimate effective bandwidth assuming some cache reuse
+	effectiveBytesTransferred := (drBytes + vectorBytes) / 2 // Conservative estimate
+	bandwidth := float64(effectiveBytesTransferred) / avgTime.Seconds() / 1e9
 
 	return benchResult{
 		avgTime:    avgTime,
@@ -277,6 +279,15 @@ func sumArray(arr []int) int {
 	return sum
 }
 
+// generateUniformK creates a K array with uniform values
+func generateUniformK(numPartitions, elementsPerPartition int) []int {
+	K := make([]int, numPartitions)
+	for i := range K {
+		K[i] = elementsPerPartition
+	}
+	return K
+}
+
 // ============================================================================
 // ESSENTIAL PERFORMANCE TESTS
 // ============================================================================
@@ -317,27 +328,19 @@ func BenchmarkPerf_BasicFunctionality(b *testing.B) {
 				result := runMatmulBenchmark(b, device, tc.K, tc.np, tc.name)
 
 				totalElements := sumArray(tc.K)
-				b.Logf("%s %s: %d partitions, %d total elements, np=%d, time=%v, GFLOPS=%.2f",
+				timeMs := float64(result.avgTime.Nanoseconds()) / 1e6
+				b.Logf("%s %s: %d partitions, %d total elements, np=%d, time=%.1fms, GFLOPS=%.2f",
 					config.name, tc.name, len(tc.K), totalElements, tc.np,
-					result.avgTime, result.gflops)
+					timeMs, result.gflops)
 			}
 		})
 	}
 }
 
-// generateUniformK creates a K array with uniform values
-func generateUniformK(numPartitions, elementsPerPartition int) []int {
-	K := make([]int, numPartitions)
-	for i := range K {
-		K[i] = elementsPerPartition
-	}
-	return K
-}
-
 // BenchmarkPerf_WeakScaling tests scaling with proportional work increase
-// This measures how performance changes as we add more partitions with constant
-// work per partition. With fixed hardware resources, we expect efficiency to
-// decrease as coordination overhead increases.
+// This measures efficiency when work increases proportionally on fixed hardware.
+// Efficiency > 100% indicates better-than-linear scaling (possible due to better
+// hardware utilization or amortized fixed costs).
 func BenchmarkPerf_WeakScaling(b *testing.B) {
 	configs := []struct {
 		name   string
@@ -362,10 +365,11 @@ func BenchmarkPerf_WeakScaling(b *testing.B) {
 			elementsPerPartition := 400
 
 			b.Logf("\n%s Weak Scaling (realistic element counts):", config.name)
-			b.Log("Partitions | Elements/Part | Total Elements | Time/Iter | Slowdown")
-			b.Log("-----------|---------------|----------------|-----------|----------")
+			b.Log("Partitions | Elements/Part | Total Elements | Time/Iter | Efficiency")
+			b.Log("-----------|---------------|----------------|-----------|------------")
 
 			var baselineTime time.Duration
+			baselinePartitions := 256
 
 			// Test with realistic partition counts for CUDA @outer optimization
 			for _, numParts := range []int{256, 512, 1024, 2048} {
@@ -378,25 +382,29 @@ func BenchmarkPerf_WeakScaling(b *testing.B) {
 
 				result := runMatmulBenchmark(b, device, K, np, fmt.Sprintf("%d_parts", numParts))
 
-				if numParts == 256 {
+				if numParts == baselinePartitions {
 					baselineTime = result.avgTime
 				}
 
-				// Slowdown factor: how much slower than baseline
-				slowdown := float64(result.avgTime) / float64(baselineTime)
+				// Calculate efficiency: work increase / time increase
+				workIncrease := float64(numParts) / float64(baselinePartitions)
+				timeIncrease := float64(result.avgTime) / float64(baselineTime)
+				efficiency := workIncrease / timeIncrease * 100.0
 
-				b.Logf("%10d | %13d | %14d | %9v | %8.2fx",
-					numParts, elementsPerPartition, totalElements, result.avgTime, slowdown)
+				// Format time with 1 decimal place
+				timeMs := float64(result.avgTime.Nanoseconds()) / 1e6
+
+				b.Logf("%10d | %13d | %14d | %8.1fms | %10.1f%%",
+					numParts, elementsPerPartition, totalElements, timeMs, efficiency)
 			}
 		})
 	}
 }
 
 // BenchmarkPerf_StrongScaling tests fixed total work divided among partitions
-// This measures how execution time changes with different partition counts
-// NOTE: "Strong scaling" traditionally assumes adding compute resources (threads/cores)
-// proportional to partitions. Here we're testing how different partition sizes
-// affect performance with FIXED hardware resources, which is more realistic.
+// This measures how execution time changes with different partition granularities.
+// With fixed hardware, we're measuring the overhead and efficiency of different
+// partition sizes, NOT traditional strong scaling speedup.
 func BenchmarkPerf_StrongScaling(b *testing.B) {
 	configs := []struct {
 		name   string
@@ -421,14 +429,18 @@ func BenchmarkPerf_StrongScaling(b *testing.B) {
 			totalElements := 262144
 
 			b.Logf("\n%s Strong Scaling (fixed %d elements):", config.name, totalElements)
-			b.Log("Partitions | Elements/Part | Time/Iter | Speedup")
-			b.Log("-----------|---------------|-----------|--------")
+			b.Log("Partitions | Elements/Part | Time/Iter | Time/Element | Overhead vs Best")
+			b.Log("-----------|---------------|-----------|--------------|------------------")
 
-			var baselineTime time.Duration
+			var bestTime time.Duration
+			var bestConfig string
 
 			// Test with partition counts that keep elements per partition <= 1024
 			// 262144/256 = 1024, 262144/512 = 512, 262144/1024 = 256
-			for _, numParts := range []int{256, 512, 1024, 2048} {
+			partitionCounts := []int{256, 512, 1024, 2048}
+			results := make([]benchResult, 0, len(partitionCounts))
+
+			for _, numParts := range partitionCounts {
 				elementsPerPart := totalElements / numParts
 
 				// Check CUDA limit
@@ -444,16 +456,35 @@ func BenchmarkPerf_StrongScaling(b *testing.B) {
 				}
 
 				result := runMatmulBenchmark(b, device, K, np, fmt.Sprintf("%d_parts", numParts))
+				results = append(results, result)
 
-				if numParts == 256 {
-					baselineTime = result.avgTime
+				if bestTime == 0 || result.avgTime < bestTime {
+					bestTime = result.avgTime
+					bestConfig = fmt.Sprintf("%d parts", numParts)
+				}
+			}
+
+			// Report results with overhead relative to best configuration
+			idx := 0
+			for _, numParts := range partitionCounts {
+				elementsPerPart := totalElements / numParts
+				if elementsPerPart > MAX_CUDA_INNER {
+					continue
 				}
 
-				speedup := float64(baselineTime) / float64(result.avgTime)
+				result := results[idx]
+				idx++
 
-				b.Logf("%10d | %13d | %9v | %7.2fx",
-					numParts, elementsPerPart, result.avgTime, speedup)
+				timePerElement := result.avgTime.Nanoseconds() / int64(totalElements)
+				overhead := (float64(result.avgTime) - float64(bestTime)) / float64(bestTime) * 100.0
+				timeMs := float64(result.avgTime.Nanoseconds()) / 1e6
+
+				b.Logf("%10d | %13d | %8.1fms | %11dns | %16.1f%%",
+					numParts, elementsPerPart, timeMs, timePerElement, overhead)
 			}
+
+			bestTimeMs := float64(bestTime.Nanoseconds()) / 1e6
+			b.Logf("Best configuration: %s with time %.1fms", bestConfig, bestTimeMs)
 		})
 	}
 }
@@ -564,9 +595,10 @@ func BenchmarkPerf_LoadBalance(b *testing.B) {
 		}
 
 		perfLoss := (float64(result.avgTime) - float64(balancedTime)) / float64(balancedTime) * 100
+		timeMs := float64(result.avgTime.Nanoseconds()) / 1e6
 
-		b.Logf("%-14s | %5d | %5d | %8.1f%% | %9v | %8.1f%%",
-			tc.name, minK, maxK, imbalance, result.avgTime, perfLoss)
+		b.Logf("%-14s | %5d | %5d | %8.1f%% | %8.1fms | %8.1f%%",
+			tc.name, minK, maxK, imbalance, timeMs, perfLoss)
 	}
 }
 
@@ -582,8 +614,8 @@ func BenchmarkPerf_CUDA_RealisticScaling(b *testing.B) {
 	np := 56 // P=5: (6)(7)(8)/6 = 56 volume points
 
 	b.Log("\nCUDA Realistic Problem Sizes:")
-	b.Log("Elements   | Partitions | Elem/Part | Time/Iter | GFLOPS | Bandwidth")
-	b.Log("-----------|------------|-----------|-----------|--------|----------")
+	b.Log("Elements   | Partitions | Elem/Part | Time/Iter | GFLOPS | Est. Bandwidth")
+	b.Log("-----------|------------|-----------|-----------|--------|---------------")
 
 	// Test realistic problem sizes
 	testCases := []struct {
@@ -625,9 +657,11 @@ func BenchmarkPerf_CUDA_RealisticScaling(b *testing.B) {
 			result := runMatmulBenchmark(b, device, K, np,
 				fmt.Sprintf("%dK_%dparts", tc.totalElements/1000, tc.partitions))
 
-			b.Logf("%10d | %10d | %9d | %9v | %6.2f | %7.2f GB/s",
+			timeMs := float64(result.avgTime.Nanoseconds()) / 1e6
+
+			b.Logf("%10d | %10d | %9d | %8.1fms | %6.2f | %7.2f GB/s",
 				tc.totalElements, tc.partitions, elementsPerPart,
-				result.avgTime, result.gflops, result.bandwidth)
+				timeMs, result.gflops, result.bandwidth)
 		}()
 	}
 }
