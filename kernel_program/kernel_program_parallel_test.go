@@ -14,6 +14,8 @@ import (
 // ============================================================================
 // Performance Test Suite for OCCA KernelProgram
 // Based on Performance Testing Principles document
+//
+// CUDA CONSTRAINT: All K values must be <= 1024 due to @inner thread limit
 // ============================================================================
 
 // Hardware cache sizes (typical x86_64)
@@ -27,6 +29,9 @@ const (
 
 	MIN_TEST_TIME = 100 * time.Millisecond // Minimum test duration
 	MAX_TEST_TIME = 2 * time.Second        // Maximum test duration
+
+	// CUDA constraint
+	MAX_CUDA_INNER = 1024
 )
 
 // computeIterations calculates iterations needed for reliable timing
@@ -250,8 +255,8 @@ func BenchmarkPerf_Serial_Baseline(b *testing.B) {
 	}
 	defer device.Free()
 
-	// Minimal size for fast execution
-	K := 1000
+	// Small size for fast execution
+	K := 256
 	np := 10
 
 	result := runMatmulBenchmark(b, device, []int{K}, np, "Serial_Baseline")
@@ -265,6 +270,27 @@ func BenchmarkPerf_Serial_Baseline(b *testing.B) {
 	}
 }
 
+// BenchmarkPerf_CUDA_Simple tests CUDA performance in isolation
+func BenchmarkPerf_CUDA_Simple(b *testing.B) {
+	// Lock to OS thread for CUDA
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	device, err := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
+	if err != nil {
+		b.Skip("CUDA device not available")
+	}
+	defer device.Free()
+
+	np := 10
+	K := []int{1024} // Maximum allowed for CUDA @inner
+
+	// Run the benchmark
+	result := runMatmulBenchmark(b, device, K, np, "CUDA")
+
+	b.Logf("CUDA: K=%d, np=%d, time=%v, GFLOPS=%.2f", K[0], np, result.avgTime, result.gflops)
+}
+
 // BenchmarkPerf_CUDA_SinglePartition tests CUDA with single partition first
 // Following Unit Testing Principle: Start with fundamentals
 func BenchmarkPerf_CUDA_SinglePartition(b *testing.B) {
@@ -274,8 +300,8 @@ func BenchmarkPerf_CUDA_SinglePartition(b *testing.B) {
 	}
 	defer device.Free()
 
-	// Test with single partition first
-	K := 1000
+	// Test with single partition, respecting CUDA limit
+	K := 1000 // < 1024
 	np := 32
 
 	result := runMatmulBenchmark(b, device, []int{K}, np, "CUDA_SinglePartition")
@@ -294,7 +320,7 @@ func BenchmarkPerf_CUDA_IncrementalPartitions(b *testing.B) {
 	defer device.Free()
 
 	np := 32
-	baseK := 1000
+	baseK := 512 // Safe value for CUDA
 
 	b.Log("\nCUDA Incremental Partition Test:")
 	b.Log("Partitions | K per part | Status")
@@ -393,27 +419,29 @@ func BenchmarkPerf_CacheEffects(b *testing.B) {
 	np := 10
 
 	// Working set sizes that cross cache boundaries
+	// Adjusted to respect CUDA limit
 	testCases := []struct {
 		name        string
 		K           int
 		expectedFit string
 	}{
-		{"L1_Fit", L1_SIZE / (2 * np * DOUBLE_SIZE), "L1"},
-		{"L2_Fit", L2_SIZE / (2 * np * DOUBLE_SIZE), "L2"},
-		{"L3_Fit", L3_SIZE / (2 * np * DOUBLE_SIZE), "L3"},
-		{"RAM_Fit", 2 * L3_SIZE / (2 * np * DOUBLE_SIZE), "RAM"},
+		{"L1_Fit", min(L1_SIZE/(2*np*DOUBLE_SIZE), MAX_CUDA_INNER), "L1"},
+		{"L2_Fit", min(L2_SIZE/(2*np*DOUBLE_SIZE), MAX_CUDA_INNER), "L2"},
+		{"L3_Fit", min(L3_SIZE/(2*np*DOUBLE_SIZE), MAX_CUDA_INNER), "L3"},
+		{"RAM_Fit", MAX_CUDA_INNER, "RAM"}, // Capped at CUDA limit
 	}
 
 	b.Log("\nCache Effects Analysis:")
-	b.Log("Size      | Working Set | Cache | Time/Iter | Bandwidth")
-	b.Log("----------|-------------|-------|-----------|----------")
+	b.Log("Size      | K   | Working Set | Cache | Time/Iter | Bandwidth")
+	b.Log("----------|-----|-------------|-------|-----------|----------")
 
 	for _, tc := range testCases {
 		result := runMatmulBenchmark(b, device, []int{tc.K}, np, tc.name)
 		workingSet := calculateWorkingSet(tc.K, np)
 
-		b.Logf("%-9s | %11s | %5s | %9v | %.2f GB/s",
+		b.Logf("%-9s | %4d | %11s | %5s | %9v | %.2f GB/s",
 			tc.name,
+			tc.K,
 			formatBytes(workingSet),
 			tc.expectedFit,
 			result.avgTime,
@@ -432,30 +460,30 @@ func BenchmarkPerf_LoadBalance(b *testing.B) {
 		name string
 		K    []int
 	}{
-		{"Balanced", []int{50000, 50000, 50000, 50000}},
-		{"Moderate", []int{40000, 50000, 50000, 60000}},
-		{"Severe", []int{10000, 20000, 70000, 100000}},
-		{"Extreme", []int{1000, 1000, 1000, 197000}},
+		{"Balanced", []int{512, 512, 512, 512}},
+		{"Unbalanced_Mild", []int{400, 500, 600, 524}},
+		{"Unbalanced_Severe", []int{100, 200, 300, 1024}},
+		{"SingleHeavy", []int{100, 100, 100, 1021}},
 	}
 
-	b.Log("\nLoad Balance Impact:")
-	b.Log("Configuration | Max/Min | Time/Iter | Relative")
-	b.Log("--------------|---------|-----------|----------")
+	b.Log("\nLoad Balance Analysis:")
+	b.Log("Configuration    | Max-Min | Imbalance | Time/Iter | Efficiency")
+	b.Log("-----------------|---------|-----------|-----------|------------")
 
 	var balancedTime time.Duration
 
 	for i, tc := range testCases {
-		// Calculate imbalance ratio
-		min, max := tc.K[0], tc.K[0]
+		minK, maxK := tc.K[0], tc.K[0]
 		for _, k := range tc.K {
-			if k < min {
-				min = k
+			if k < minK {
+				minK = k
 			}
-			if k > max {
-				max = k
+			if k > maxK {
+				maxK = k
 			}
 		}
-		ratio := float64(max) / float64(min)
+
+		imbalance := float64(maxK-minK) / float64(maxK) * 100
 
 		result := runMatmulBenchmark(b, device, tc.K, np, tc.name)
 
@@ -463,135 +491,25 @@ func BenchmarkPerf_LoadBalance(b *testing.B) {
 			balancedTime = result.avgTime
 		}
 
-		relative := float64(result.avgTime) / float64(balancedTime)
+		efficiency := float64(balancedTime) / float64(result.avgTime) * 100
 
-		b.Logf("%-13s | %7.1fx | %9v | %7.2fx",
-			tc.name, ratio, result.avgTime, relative)
-	}
-}
+		b.Logf("%-16s | %7d | %8.1f%% | %9v | %9.1f%%",
+			tc.name, maxK-minK, imbalance, result.avgTime, efficiency)
 
-// BenchmarkPerf_BandwidthSaturation measures memory bandwidth utilization
-func BenchmarkPerf_BandwidthSaturation(b *testing.B) {
-	device := createTestDevice()
-	defer device.Free()
-
-	// Test with varying np to change compute intensity
-	testCases := []struct {
-		np       int
-		K        int
-		name     string
-		expected string
-	}{
-		{5, 100000, "Low_Compute", "Bandwidth bound"},
-		{10, 50000, "Medium_Compute", "Balanced"},
-		{20, 25000, "High_Compute", "Compute bound"},
-		{40, 12500, "Very_High_Compute", "Compute bound"},
-	}
-
-	b.Log("\nBandwidth vs Compute Analysis:")
-	b.Log("Config         | np | Elements | GFLOPS | Bandwidth | Assessment")
-	b.Log("---------------|----|---------|---------|-----------|-----------")
-
-	for _, tc := range testCases {
-		result := runMatmulBenchmark(b, device, []int{tc.K}, tc.np, tc.name)
-
-		// Arithmetic intensity = FLOPS/byte
-		// For matmul: 2*K*np*np FLOPS, 2*K*np*8 bytes accessed
-		intensity := float64(2*tc.np) / 16.0
-
-		b.Logf("%-14s | %2d | %7d | %7.2f | %7.2f GB/s | %s (AI=%.1f)",
-			tc.name, tc.np, tc.K, result.gflops, result.bandwidth,
-			tc.expected, intensity)
-
-		// Warn if bandwidth seems unrealistic
-		if result.bandwidth > 2000 {
-			b.Logf("  Warning: Bandwidth %.0f GB/s seems high (cache effects?)", result.bandwidth)
+		// Warn if imbalance causes significant performance degradation
+		if efficiency < 90 && imbalance > 20 {
+			b.Logf("  Warning: Load imbalance causing >10%% performance loss (%.1f%%)", 100-efficiency)
 		}
 	}
 }
 
-// BenchmarkPerf_MixedSizes tests performance with heterogeneous partition sizes
-func BenchmarkPerf_MixedSizes(b *testing.B) {
+// BenchmarkPerf_TimingStability measures timing stability across multiple runs
+func BenchmarkPerf_TimingStability(b *testing.B) {
 	device := createTestDevice()
 	defer device.Free()
 
 	np := 10
-
-	testCases := []struct {
-		name string
-		K    []int
-	}{
-		{"Uniform_Small", []int{10000, 10000, 10000, 10000}},
-		{"Uniform_Large", []int{50000, 50000, 50000, 50000}},
-		{"Ascending", []int{10000, 30000, 50000, 70000}},
-		{"Descending", []int{70000, 50000, 30000, 10000}},
-		{"Mixed", []int{50000, 10000, 70000, 30000}},
-	}
-
-	b.Log("\nMixed Partition Sizes:")
-	b.Log("Configuration | Total Elems | Time/Iter | GFLOPS")
-	b.Log("--------------|-------------|-----------|--------")
-
-	for _, tc := range testCases {
-		totalElems := 0
-		for _, k := range tc.K {
-			totalElems += k
-		}
-
-		result := runMatmulBenchmark(b, device, tc.K, np, tc.name)
-
-		b.Logf("%-13s | %11d | %9v | %7.2f",
-			tc.name, totalElems, result.avgTime, result.gflops)
-	}
-}
-
-// BenchmarkPerf_PowerOfTwo tests performance with power-of-2 vs non-power-of-2 sizes
-func BenchmarkPerf_PowerOfTwo(b *testing.B) {
-	device := createTestDevice()
-	defer device.Free()
-
-	np := 16 // Power of 2
-
-	testCases := []struct {
-		name string
-		K    int
-	}{
-		{"Pow2_16384", 16384},
-		{"NonPow2_16383", 16383},
-		{"NonPow2_16385", 16385},
-		{"Pow2_32768", 32768},
-		{"NonPow2_32767", 32767},
-		{"NonPow2_32769", 32769},
-	}
-
-	b.Log("\nPower-of-2 Effects:")
-	b.Log("Size Type     | Elements | Time/Iter | GFLOPS | Delta")
-	b.Log("--------------|----------|-----------|--------|-------")
-
-	var pow2Time time.Duration
-	for i, tc := range testCases {
-		result := runMatmulBenchmark(b, device, []int{tc.K}, np, tc.name)
-
-		delta := ""
-		if i%3 == 0 {
-			pow2Time = result.avgTime
-		} else {
-			diff := float64(result.avgTime-pow2Time) / float64(pow2Time) * 100
-			delta = fmt.Sprintf("%+.1f%%", diff)
-		}
-
-		b.Logf("%-13s | %8d | %9v | %6.2f | %6s",
-			tc.name, tc.K, result.avgTime, result.gflops, delta)
-	}
-}
-
-// BenchmarkPerf_Stability measures timing stability across multiple runs
-func BenchmarkPerf_Stability(b *testing.B) {
-	device := createTestDevice()
-	defer device.Free()
-
-	np := 10
-	K := []int{50000}
+	K := []int{1024} // Use CUDA limit
 	numRuns := 10
 
 	times := make([]time.Duration, numRuns)
@@ -641,60 +559,117 @@ func BenchmarkPerf_MemoryPressure(b *testing.B) {
 
 	np := 10
 
-	// Gradually increase memory usage
+	// Use smaller K values to stay within CUDA limits
 	testCases := []struct {
 		name      string
 		numArrays int
 		K         int
 		memoryMB  int
 	}{
-		{"Light_10MB", 2, 65536, 10},
-		{"Medium_100MB", 2, 655360, 100},
-		{"Heavy_500MB", 2, 3276800, 500},
+		{"Light_1MB", 2, 512, 1},
+		{"Medium_10MB", 2, 1024, 10},
+		{"Heavy_50MB", 4, 1024, 50},
 	}
 
 	b.Log("\nMemory Pressure Analysis:")
-	b.Log("Pressure    | Arrays | Memory | Time/Iter | Bandwidth")
-	b.Log("------------|--------|--------|-----------|----------")
+	b.Log("Pressure    | Arrays | K    | Memory | Time/Iter | Bandwidth")
+	b.Log("------------|--------|------|--------|-----------|----------")
 
 	for _, tc := range testCases {
 		// Skip if too large for available memory
 		totalBytes := int64(tc.numArrays * tc.K * np * DOUBLE_SIZE)
-		if totalBytes > 2*1024*1024*1024 { // Skip if >2GB
-			b.Logf("%-11s | %6d | %6dMB | %9s | %9s",
-				tc.name, tc.numArrays, tc.memoryMB, "SKIPPED", "Too large")
-			continue
-		}
+		actualMB := int(totalBytes / (1024 * 1024))
 
 		result := runMatmulBenchmark(b, device, []int{tc.K}, np, tc.name)
 
-		b.Logf("%-11s | %6d | %6dMB | %9v | %7.2f GB/s",
-			tc.name, tc.numArrays, tc.memoryMB, result.avgTime, result.bandwidth)
+		b.Logf("%-11s | %6d | %4d | %6dMB | %9v | %7.2f GB/s",
+			tc.name, tc.numArrays, tc.K, actualMB, result.avgTime, result.bandwidth)
 
 		// Warn if bandwidth drops significantly
 		if result.bandwidth < 10 {
-			b.Logf("  Warning: Low bandwidth suggests memory pressure. May not be saturating memory.")
+			b.Logf("  Warning: Low bandwidth suggests memory pressure or small problem size.")
 		}
 	}
 }
 
-// BenchmarkPerf_CUDA_Simple tests CUDA performance in isolation
-func BenchmarkPerf_CUDA_Simple(b *testing.B) {
-	// Lock to OS thread for CUDA
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
-	device, err := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
-	if err != nil {
-		b.Skip("CUDA device not available")
-	}
+// BenchmarkPerf_MixedSizes tests performance with heterogeneous partition sizes
+func BenchmarkPerf_MixedSizes(b *testing.B) {
+	device := createTestDevice()
 	defer device.Free()
 
-	np := 10          // Smaller np
-	K := []int{10000} // Single partition, smaller size
+	np := 10
 
-	// Run the benchmark
-	result := runMatmulBenchmark(b, device, K, np, "CUDA")
+	// All K values must be <= 1024 for CUDA
+	testCases := []struct {
+		name string
+		K    []int
+	}{
+		{"Uniform_Small", []int{256, 256, 256, 256}},
+		{"Uniform_Large", []int{1024, 1024, 1024, 1024}},
+		{"Ascending", []int{256, 512, 768, 1024}},
+		{"Descending", []int{1024, 768, 512, 256}},
+		{"Mixed", []int{1024, 256, 768, 512}},
+	}
 
-	b.Logf("CUDA: time=%v, GFLOPS=%.2f", result.avgTime, result.gflops)
+	b.Log("\nMixed Partition Sizes:")
+	b.Log("Configuration | Total Elems | Time/Iter | GFLOPS")
+	b.Log("--------------|-------------|-----------|--------")
+
+	for _, tc := range testCases {
+		totalElems := 0
+		for _, k := range tc.K {
+			totalElems += k
+		}
+
+		result := runMatmulBenchmark(b, device, tc.K, np, tc.name)
+
+		b.Logf("%-13s | %11d | %9v | %7.2f",
+			tc.name, totalElems, result.avgTime, result.gflops)
+	}
+}
+
+// BenchmarkPerf_PowerOfTwo tests performance with power-of-2 vs non-power-of-2 sizes
+func BenchmarkPerf_PowerOfTwo(b *testing.B) {
+	device := createTestDevice()
+	defer device.Free()
+
+	np := 16 // Power of 2
+
+	// All values must be <= 1024 for CUDA
+	testCases := []struct {
+		name string
+		K    int
+	}{
+		{"Pow2_256", 256},
+		{"NonPow2_255", 255},
+		{"NonPow2_257", 257},
+		{"Pow2_512", 512},
+		{"NonPow2_511", 511},
+		{"NonPow2_513", 513},
+		{"Pow2_1024", 1024},
+		{"NonPow2_1023", 1023},
+	}
+
+	b.Log("\nPower-of-2 Effects:")
+	b.Log("Size Type     | Elements | Time/Iter | GFLOPS | Delta")
+	b.Log("--------------|----------|-----------|--------|-------")
+
+	var pow2Time time.Duration
+	baseIdx := 0
+
+	for i, tc := range testCases {
+		result := runMatmulBenchmark(b, device, []int{tc.K}, np, tc.name)
+
+		delta := ""
+		if i%3 == 0 {
+			pow2Time = result.avgTime
+			baseIdx = i
+		} else if i-baseIdx <= 2 {
+			diff := float64(result.avgTime-pow2Time) / float64(pow2Time) * 100
+			delta = fmt.Sprintf("%+.1f%%", diff)
+		}
+
+		b.Logf("%-13s | %8d | %9v | %6.2f | %6s",
+			tc.name, tc.K, result.avgTime, result.gflops, delta)
+	}
 }

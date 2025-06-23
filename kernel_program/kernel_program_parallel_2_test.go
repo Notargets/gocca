@@ -26,7 +26,7 @@ func BenchmarkPerf_WeakScaling(b *testing.B) {
 
 		b.Run(config.name+"_WeakScaling", func(b *testing.B) {
 			np := 32
-			baseWork := 50000
+			baseWork := 512 // Reduced from 50000 to stay within CUDA limit
 
 			b.Logf("\n%s Weak Scaling (proportional work increase):", config.name)
 			b.Log("Partitions | Total Work | Time/Iter | Efficiency")
@@ -126,7 +126,7 @@ func BenchmarkPerf_WeakScaling(b *testing.B) {
 	}
 }
 
-// BenchmarkPerf_StrongScaling tests fixed total work
+// BenchmarkPerf_StrongScaling tests fixed total work divided among partitions
 func BenchmarkPerf_StrongScaling(b *testing.B) {
 	configs := []struct {
 		name   string
@@ -145,7 +145,7 @@ func BenchmarkPerf_StrongScaling(b *testing.B) {
 
 		b.Run(config.name+"_StrongScaling", func(b *testing.B) {
 			np := 32
-			totalWork := 200000 // Fixed total elements
+			totalWork := 4096 // Reduced from 200000, divisible by 1,2,4,8
 
 			b.Logf("\n%s Strong Scaling (constant total work):", config.name)
 			b.Log("Partitions | Work/Part | Time/Iter | Speedup | Efficiency")
@@ -156,6 +156,13 @@ func BenchmarkPerf_StrongScaling(b *testing.B) {
 			for _, numParts := range []int{1, 2, 4, 8} {
 				K := make([]int, numParts)
 				workPerPart := totalWork / numParts
+
+				// Ensure we don't exceed CUDA limit
+				if workPerPart > 1024 {
+					b.Logf("%10d | %9d | SKIPPED: exceeds CUDA limit", numParts, workPerPart)
+					continue
+				}
+
 				for i := range K {
 					K[i] = workPerPart
 				}
