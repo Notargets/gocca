@@ -10,7 +10,7 @@ import (
 
 // Test proper matrix multiplication with known results
 func TestKernelProgram_MatrixMultiplication_KnownAnswer(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	np := 3
@@ -111,7 +111,7 @@ func TestKernelProgram_MatrixMultiplication_KnownAnswer(t *testing.T) {
 
 // Test strided array layout for face data
 func TestKernelProgram_StridedFaceArray(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	// Simulate face data structure
@@ -252,7 +252,7 @@ func TestKernelProgram_StridedFaceArray(t *testing.T) {
 
 // Test multiple arrays passed to kernel with matrix operations
 func TestKernelProgram_MultipleArraysWithMatMul(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	np := 4

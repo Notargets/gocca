@@ -28,7 +28,7 @@ func TestKernelProgram_Creation_RequiresValidDevice(t *testing.T) {
 
 	// Test empty K array
 	t.Run("EmptyKArray", func(t *testing.T) {
-		device := createTestDevice(t)
+		device := createTestDevice()
 		defer device.Free()
 
 		defer func() {
@@ -42,7 +42,7 @@ func TestKernelProgram_Creation_RequiresValidDevice(t *testing.T) {
 
 // Test 1.2: Single partition creation
 func TestKernelProgram_Creation_SinglePartition(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{
@@ -66,7 +66,7 @@ func TestKernelProgram_Creation_SinglePartition(t *testing.T) {
 
 // Test 1.3: KpartMax computation with multiple partitions
 func TestKernelProgram_Creation_KpartMaxComputation(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	testCases := []struct {
@@ -100,7 +100,7 @@ func TestKernelProgram_Creation_KpartMaxComputation(t *testing.T) {
 
 // Test 2.1: Type definitions and constants generation
 func TestKernelProgram_CodeGen_TypesAndConstants(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{
@@ -137,7 +137,7 @@ func TestKernelProgram_CodeGen_TypesAndConstants(t *testing.T) {
 
 // Test 2.2: Matrix macro generation with @inner loop
 func TestKernelProgram_CodeGen_MatrixMacroStructure(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{K: []int{10, 20}})
@@ -179,7 +179,7 @@ func TestKernelProgram_CodeGen_MatrixMacroStructure(t *testing.T) {
 
 // Test 3.1: Single array allocation
 func TestKernelProgram_Memory_SingleArrayAllocation(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{K: []int{10}})
@@ -208,7 +208,7 @@ func TestKernelProgram_Memory_SingleArrayAllocation(t *testing.T) {
 
 // Test 3.2: Alignment calculations with multiple partitions
 func TestKernelProgram_Memory_AlignmentCalculations(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	// Use odd-sized partitions to test padding
@@ -249,7 +249,7 @@ func TestKernelProgram_Memory_AlignmentCalculations(t *testing.T) {
 
 // Test 4.1: Build kernel with proper @outer/@inner structure
 func TestKernelProgram_Kernel_ProperOCCAStructure(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{K: []int{10}})
@@ -278,7 +278,7 @@ func TestKernelProgram_Kernel_ProperOCCAStructure(t *testing.T) {
 
 // Test 4.2: Kernel execution with matrix operation
 func TestKernelProgram_Execution_MatrixOperation(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	np := 3
@@ -373,7 +373,7 @@ func TestKernelProgram_Execution_MatrixOperation(t *testing.T) {
 
 // Test 5.1: Systematic partition count increase
 func TestKernelProgram_Incremental_PartitionScaling(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	// Test increasing partition counts
@@ -421,7 +421,7 @@ func TestKernelProgram_Incremental_PartitionScaling(t *testing.T) {
 
 // Test 6.1: Degenerate partition configurations
 func TestKernelProgram_EdgeCases_DegeneratePartitions(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	testCases := []struct {
@@ -460,7 +460,7 @@ func TestKernelProgram_EdgeCases_DegeneratePartitions(t *testing.T) {
 
 // Test 7.1: Offset calculations preserve total size
 func TestKernelProgram_MathProperties_OffsetCalculations(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	k := []int{10, 15, 20}
@@ -509,7 +509,7 @@ func TestKernelProgram_MathProperties_OffsetCalculations(t *testing.T) {
 
 // Test 8.1: Complete differentiation workflow
 func TestKernelProgram_Integration_DifferentiationWorkflow(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	// Problem setup
@@ -606,7 +606,7 @@ func TestKernelProgram_Integration_DifferentiationWorkflow(t *testing.T) {
 
 // Test 4.2: Kernel execution with matrix operation - DEBUG VERSION
 func TestKernelProgram_Execution_MatrixOperation_Debug(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	np := 3

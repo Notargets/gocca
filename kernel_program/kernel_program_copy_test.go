@@ -14,7 +14,7 @@ import (
 
 // Test 1.1: GetArrayType basic functionality
 func TestGetArrayType_BasicFunctionality(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{
@@ -63,7 +63,7 @@ func TestGetArrayType_BasicFunctionality(t *testing.T) {
 
 // Test 1.2: GetArrayType error cases
 func TestGetArrayType_ErrorCases(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{K: []int{10}})
@@ -78,7 +78,7 @@ func TestGetArrayType_ErrorCases(t *testing.T) {
 
 // Test 1.3: GetArrayLogicalSize basic functionality
 func TestGetArrayLogicalSize_BasicFunctionality(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{K: []int{10}})
@@ -130,7 +130,7 @@ func TestGetArrayLogicalSize_BasicFunctionality(t *testing.T) {
 
 // Test 2.1: GetArrayLogicalSize with multiple partitions
 func TestGetArrayLogicalSize_MultiplePartitions(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	// Test incrementally: 1, 2, 3, ... partitions
@@ -182,7 +182,7 @@ func TestGetArrayLogicalSize_MultiplePartitions(t *testing.T) {
 
 // Test 2.2: CopyArrayToHost single partition
 func TestCopyArrayToHost_SinglePartition(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{
@@ -233,7 +233,7 @@ func TestCopyArrayToHost_SinglePartition(t *testing.T) {
 
 // Test 3.1: CopyArrayToHost type verification
 func TestCopyArrayToHost_TypeVerification(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{K: []int{10}})
@@ -272,7 +272,7 @@ func TestCopyArrayToHost_TypeVerification(t *testing.T) {
 
 // Test 3.2: All supported types
 func TestCopyArrayToHost_AllTypes(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{K: []int{5}})
@@ -350,7 +350,7 @@ func TestCopyArrayToHost_AllTypes(t *testing.T) {
 
 // Test 4.1: CopyArrayToHost removes padding correctly
 func TestCopyArrayToHost_PaddingRemoval(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	// Use odd-sized partitions to ensure padding
@@ -430,7 +430,7 @@ func TestCopyArrayToHost_PaddingRemoval(t *testing.T) {
 
 // Test 5.1: CopyPartitionToHost single partition
 func TestCopyPartitionToHost_SinglePartition(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{K: []int{5}})
@@ -472,7 +472,7 @@ func TestCopyPartitionToHost_SinglePartition(t *testing.T) {
 
 // Test 5.2: CopyPartitionToHost multiple partitions incrementally
 func TestCopyPartitionToHost_MultiplePartitions(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	k := []int{3, 4, 5}
@@ -534,7 +534,7 @@ func TestCopyPartitionToHost_MultiplePartitions(t *testing.T) {
 
 // Test 5.3: CopyPartitionToHost with alignment
 func TestCopyPartitionToHost_WithAlignment(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	k := []int{3, 5, 7} // Odd sizes to test padding
@@ -613,7 +613,7 @@ func TestCopyPartitionToHost_WithAlignment(t *testing.T) {
 
 // Test 6.1: CopyPartitionToHost error cases
 func TestCopyPartitionToHost_ErrorCases(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{K: []int{3, 4}})
@@ -657,7 +657,7 @@ func TestCopyPartitionToHost_ErrorCases(t *testing.T) {
 
 // Test 6.2: Edge case - empty partitions
 func TestCopyMethods_EmptyPartitions(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	// Include zero-sized partitions
@@ -703,7 +703,7 @@ func TestCopyMethods_EmptyPartitions(t *testing.T) {
 
 // Test 7.1: Test with Int32 offsets
 func TestCopyMethods_Int32Offsets(t *testing.T) {
-	device := createTestDevice(t)
+	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{
