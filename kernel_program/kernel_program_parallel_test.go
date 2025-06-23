@@ -73,21 +73,26 @@ func computeIterations(expectedTimePerIter time.Duration) int {
 
 // createTestDevice creates a device for testing, preferring parallel backends
 func createTestDevice() *gocca.OCCADevice {
-	// Try OpenMP first, then CUDA, then fall back to Serial
+	// Try OpenCL with different JSON formats, then OpenMP, then CUDA, then fall back to Serial
 	backends := []string{
+		// Try without quotes around numbers
+		`{mode: 'OpenCL', platform_id: 0, device_id: 0}`,
+		// Original OpenMP
 		`{"mode": "OpenMP"}`,
 		`{"mode": "CUDA", "device_id": 0}`,
 		`{"mode": "Serial"}`,
 	}
 
-	for _, backend := range backends {
-		device, err := gocca.NewDevice(backend)
+	for _, props := range backends {
+		device, err := gocca.NewDevice(props)
 		if err == nil {
+			fmt.Printf("Created %s device\n", device.Mode())
 			return device
 		}
 	}
 
-	panic("No OCCA device available")
+	// Should not reach here
+	panic("Failed to create any device")
 }
 
 // ============================================================================
@@ -307,6 +312,7 @@ func BenchmarkPerf_BasicFunctionality(b *testing.B) {
 		device string
 	}{
 		{"Serial", `{"mode": "Serial"}`},
+		{"OpenCL", `{"mode": "OpenCL", "device_id": 0, "platform_id": 0}`},
 		{"OpenMP", `{"mode": "OpenMP"}`},
 		{"CUDA", `{"mode": "CUDA", "device_id": 0}`},
 	}
@@ -353,6 +359,7 @@ func BenchmarkPerf_WeakScaling(b *testing.B) {
 		name   string
 		device string
 	}{
+		{"OpenCL", `{"mode": "OpenCL", "device_id": 0, "platform_id": 0}`},
 		{"OpenMP", `{"mode": "OpenMP"}`},
 		{"CUDA", `{"mode": "CUDA", "device_id": 0}`},
 	}
@@ -417,6 +424,7 @@ func BenchmarkPerf_StrongScaling(b *testing.B) {
 		name   string
 		device string
 	}{
+		{"OpenCL", `{"mode": "OpenCL", "device_id": 0, "platform_id": 0}`},
 		{"OpenMP", `{"mode": "OpenMP"}`},
 		{"CUDA", `{"mode": "CUDA", "device_id": 0}`},
 	}
