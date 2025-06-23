@@ -327,3 +327,30 @@ func TestDeviceWrapMemory(t *testing.T) {
 	mem2 = device.TypedWrapMemory(ptr, int64(entries), gocca.DtypeInt, memProps)
 	mem2.Free()
 }
+
+// TestCUDAThreadLocking verifies that CUDA devices properly lock OS threads
+func TestCUDAThreadLocking(t *testing.T) {
+	// Create CUDA device
+	device, err := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
+	if err != nil {
+		t.Skip("CUDA device not available:", err)
+	}
+
+	// Verify thread is locked
+	if !device.IsThreadLocked() {
+		t.Error("CUDA device should have locked the OS thread")
+	}
+
+	// Test that operations work without CUDA_ERROR_INVALID_CONTEXT
+	mem := device.Malloc(1024, nil, nil)
+	if mem == nil {
+		t.Error("Failed to allocate memory on CUDA device")
+	}
+	mem.Free()
+
+	// Free device and verify thread is unlocked
+	device.Free()
+	if device.IsThreadLocked() {
+		t.Error("Thread should be unlocked after device.Free()")
+	}
+}
