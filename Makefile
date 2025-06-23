@@ -6,7 +6,8 @@ test:
 	. ~/.bashrc && go test -parallel=1 -cover ./...
 
 bench:
-	go test -bench=BenchmarkParallelScalingLarge -benchtime=10x ./kernel_program
+	#go test -bench=BenchmarkParallelScalingLarge -benchtime=10x ./kernel_program
+	go test -bench=. -run=^$ -parallel=1 -benchtime=10x ./...
 
 tidy:
 	go mod tidy

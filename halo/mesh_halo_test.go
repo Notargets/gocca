@@ -339,26 +339,3 @@ func TestDetailedReport(t *testing.T) {
 		})
 	}
 }
-
-// BenchmarkPartitionDataCreation benchmarks the data structure creation
-func BenchmarkPartitionDataCreation(b *testing.B) {
-	sizes := []struct {
-		name           string
-		nx, ny         int
-		partNx, partNy int
-	}{
-		{"16x16_4x4", 16, 16, 4, 4},
-		{"32x32_4x4", 32, 32, 4, 4},
-		{"64x64_8x8", 64, 64, 8, 8},
-	}
-
-	for _, size := range sizes {
-		mesh, _ := NewTestMesh2D(size.nx, size.ny, size.partNx, size.partNy)
-
-		b.Run(size.name, func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
-				_ = BuildPartitionHaloData(mesh.Topo)
-			}
-		})
-	}
-}
