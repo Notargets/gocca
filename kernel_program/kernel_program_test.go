@@ -2,7 +2,6 @@ package kernel_program
 
 import (
 	"fmt"
-	"github.com/notargets/gocca"
 	"gonum.org/v1/gonum/mat"
 	"math"
 	"strings"
@@ -604,14 +603,6 @@ func TestKernelProgram_Integration_DifferentiationWorkflow(t *testing.T) {
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-func createTestDevice(t *testing.T) *gocca.OCCADevice {
-	device, err := gocca.NewDevice(`{"mode": "Serial"}`)
-	if err != nil {
-		t.Fatalf("Failed to create device: %v", err)
-	}
-	return device
-}
 
 // Test 4.2: Kernel execution with matrix operation - DEBUG VERSION
 func TestKernelProgram_Execution_MatrixOperation_Debug(t *testing.T) {
