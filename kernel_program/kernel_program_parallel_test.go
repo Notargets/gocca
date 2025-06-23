@@ -2,7 +2,6 @@ package kernel_program
 
 import (
 	"fmt"
-	"runtime"
 	"testing"
 	"time"
 	"unsafe"
@@ -272,10 +271,6 @@ func BenchmarkPerf_Serial_Baseline(b *testing.B) {
 
 // BenchmarkPerf_CUDA_Simple tests CUDA performance in isolation
 func BenchmarkPerf_CUDA_Simple(b *testing.B) {
-	// Lock to OS thread for CUDA
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
-
 	device, err := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
 	if err != nil {
 		b.Skip("CUDA device not available")
