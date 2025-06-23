@@ -2,7 +2,6 @@ package kernel_program
 
 import (
 	"github.com/notargets/gocca"
-	"runtime"
 	"testing"
 	"time"
 	"unsafe"
@@ -20,12 +19,6 @@ func BenchmarkPerf_WeakScaling(b *testing.B) {
 
 	for _, config := range configs {
 		b.Run(config.name+"_WeakScaling", func(b *testing.B) {
-			// CUDA requires thread affinity
-			if config.name == "CUDA" {
-				runtime.LockOSThread()
-				defer runtime.UnlockOSThread()
-			}
-
 			device, err := gocca.NewDevice(config.device)
 			if err != nil {
 				b.Skip("Device not available")
@@ -148,12 +141,6 @@ func BenchmarkPerf_StrongScaling(b *testing.B) {
 
 	for _, config := range configs {
 		b.Run(config.name+"_StrongScaling", func(b *testing.B) {
-			// CUDA requires thread affinity
-			if config.name == "CUDA" {
-				runtime.LockOSThread()
-				defer runtime.UnlockOSThread()
-			}
-
 			device, err := gocca.NewDevice(config.device)
 			if err != nil {
 				b.Skip("Device not available")
