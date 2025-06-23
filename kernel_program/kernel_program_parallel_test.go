@@ -457,7 +457,8 @@ func BenchmarkPerf_BasicFunctionality(b *testing.B) {
 		name   string
 		device string
 	}{
-		{"OpenMP", `{"mode": "OpenMP", "kernel": {"compiler_flags": "-O3"}}`},
+		// {"OpenMP", `{"mode": "OpenMP", "kernel": {"compiler_flags": "-O3"}}`},
+		{"OpenMP", `{"mode": "OpenMP"}`},
 		{"CUDA", `{"mode": "CUDA", "device_id": 0}`},
 	}
 
