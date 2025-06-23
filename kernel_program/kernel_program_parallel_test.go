@@ -420,40 +420,6 @@ func BenchmarkPerf_CacheEffects(b *testing.B) {
 	}
 }
 
-// BenchmarkPerf_PartitionOverhead measures impact of multiple partitions
-func BenchmarkPerf_PartitionOverhead(b *testing.B) {
-	device := createTestDevice()
-	defer device.Free()
-
-	np := 10
-	totalK := 50000 // Keep total work constant
-
-	b.Log("\nPartition Overhead Analysis (constant total work):")
-	b.Log("Partitions | Elements/Part | Time/Iter | Overhead")
-	b.Log("-----------|---------------|-----------|----------")
-
-	var singlePartTime time.Duration
-
-	for numParts := 1; numParts <= 16; numParts *= 2 {
-		K := make([]int, numParts)
-		for i := range K {
-			K[i] = totalK / numParts
-		}
-
-		result := runMatmulBenchmark(b, device, K, np,
-			fmt.Sprintf("%d_partitions", numParts))
-
-		if numParts == 1 {
-			singlePartTime = result.avgTime
-		}
-
-		overhead := (float64(result.avgTime) / float64(singlePartTime)) - 1.0
-
-		b.Logf("%10d | %13d | %9v | %7.1f%%",
-			numParts, totalK/numParts, result.avgTime, overhead*100)
-	}
-}
-
 // BenchmarkPerf_LoadBalance tests impact of uneven work distribution
 func BenchmarkPerf_LoadBalance(b *testing.B) {
 	device := createTestDevice()
@@ -541,60 +507,6 @@ func BenchmarkPerf_BandwidthSaturation(b *testing.B) {
 			b.Logf("  Warning: Bandwidth %.0f GB/s seems high (cache effects?)", result.bandwidth)
 		}
 	}
-}
-
-// BenchmarkPerf_MaxPartitions tests scaling limits
-func BenchmarkPerf_MaxPartitions(b *testing.B) {
-	device := createTestDevice()
-	defer device.Free()
-
-	np := 10
-	elementsPerPart := 1000 // Small to allow many partitions
-
-	b.Log("\nMaximum Partition Scaling:")
-	b.Log("Partitions | Total Elems | Time/Iter | Avg µs/part")
-	b.Log("-----------|-------------|-----------|-------------")
-
-	for _, numParts := range []int{1, 10, 50, 100, 200, 500} {
-		K := make([]int, numParts)
-		for i := range K {
-			K[i] = elementsPerPart
-		}
-
-		result := runMatmulBenchmark(b, device, K, np,
-			fmt.Sprintf("%d_partitions", numParts))
-
-		avgPerPart := result.avgTime / time.Duration(numParts)
-
-		b.Logf("%10d | %11d | %9v | %11.2f",
-			numParts, numParts*elementsPerPart, result.avgTime,
-			float64(avgPerPart.Microseconds()))
-
-		// Warn if per-partition overhead is high
-		if avgPerPart > 100*time.Microsecond {
-			b.Logf("  Warning: High per-partition overhead (>100µs)")
-		}
-	}
-}
-
-// BenchmarkPerf_RandomAccess tests performance with random vs sequential patterns
-func BenchmarkPerf_RandomAccess(b *testing.B) {
-	device := createTestDevice()
-	defer device.Free()
-
-	np := 10
-	K := []int{50000}
-
-	// Sequential access (baseline)
-	seqResult := runMatmulBenchmark(b, device, K, np, "Sequential")
-
-	// TODO: Implement random access pattern kernel for comparison
-	// This would require a modified kernel that accesses elements randomly
-
-	b.Logf("\nAccess Pattern Analysis:")
-	b.Logf("Sequential: time=%v, bandwidth=%.2f GB/s",
-		seqResult.avgTime, seqResult.bandwidth)
-	b.Log("Random access test requires specialized kernel implementation")
 }
 
 // BenchmarkPerf_MixedSizes tests performance with heterogeneous partition sizes
@@ -792,7 +704,6 @@ func BenchmarkPerf_CompareBackends(b *testing.B) {
 				backend.name, "No", "-", "-", "-")
 			continue
 		}
-		defer device.Free()
 
 		result := runMatmulBenchmark(b, device, K, np, backend.name)
 
@@ -803,5 +714,11 @@ func BenchmarkPerf_CompareBackends(b *testing.B) {
 
 		b.Logf("%-7s | %9s | %9v | %6.2f | %7.2fx",
 			backend.name, "Yes", result.avgTime, result.gflops, speedup)
+
+		// Ensure all operations complete before freeing device
+		device.Finish()
+
+		// Free device immediately after use to avoid CUDA context issues
+		device.Free()
 	}
 }
