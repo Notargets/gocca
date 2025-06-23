@@ -514,7 +514,8 @@ func BenchmarkPerf_LoadBalance(b *testing.B) {
 	numPartitions := 256 // Realistic partition count
 
 	// Use same total as strong scaling for consistency
-	totalElements := 262144                             // 256K elements
+	// totalElements := 262144                             // 256K elements
+	totalElements := 200000                             // 200K elements
 	avgElementsPerPart := totalElements / numPartitions // 1024
 
 	testCases := []struct {

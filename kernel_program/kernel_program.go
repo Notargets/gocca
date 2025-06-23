@@ -99,6 +99,14 @@ func NewKernelProgram(device *gocca.OCCADevice, cfg Config) *KernelProgram {
 		panic(fmt.Sprintf("CUDA @inner limit exceeded: KpartMax=%d but CUDA is limited to 1024 threads per @inner loop. Reduce partition sizes.", kpartMax))
 	}
 
+	// Check OpenCL work group size limit
+	// Most OpenCL CPUs support 1024, but some are limited to 256 or 512
+	// TODO: Query actual device limit using clGetDeviceInfo(CL_DEVICE_MAX_WORK_GROUP_SIZE)
+	const openCLWorkGroupLimit = 1024
+	if device.Mode() == "OpenCL" && kpartMax > openCLWorkGroupLimit {
+		panic(fmt.Sprintf("OpenCL work group size limit exceeded: KpartMax=%d but OpenCL work group size is limited to %d. Reduce partition sizes.", kpartMax, openCLWorkGroupLimit))
+	}
+
 	// Set defaults
 	floatType := cfg.FloatType
 	if floatType == 0 {
