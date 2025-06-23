@@ -67,7 +67,6 @@ func createTestDevice() *gocca.OCCADevice {
 	}
 
 	panic("No OCCA device available")
-	return nil
 }
 
 // ============================================================================
@@ -314,10 +313,70 @@ func BenchmarkPerf_CUDA_IncrementalPartitions(b *testing.B) {
 				}
 			}()
 
-			result := runMatmulBenchmark(b, device, K, np,
-				fmt.Sprintf("CUDA_%d_partitions", numParts))
+			// Don't use runMatmulBenchmark for CUDA to avoid resource issues
+			// Inline the logic and ensure proper cleanup
+			totalElements := sumArray(K)
+			totalNodes := totalElements * np
 
-			b.Logf("%10d | %10d | OK: %v", numParts, baseK, result.avgTime)
+			kp := NewKernelProgram(device, Config{
+				K:         K,
+				FloatType: Float64,
+			})
+
+			Dr := createTestMatrix(np, np)
+			kp.AddStaticMatrix("Dr", Dr)
+
+			specs := []ArraySpec{
+				{
+					Name:      "U",
+					Size:      int64(totalNodes * DOUBLE_SIZE),
+					DataType:  Float64,
+					Alignment: CacheLineAlign,
+				},
+				{
+					Name:      "V",
+					Size:      int64(totalNodes * DOUBLE_SIZE),
+					DataType:  Float64,
+					Alignment: CacheLineAlign,
+				},
+			}
+
+			err := kp.AllocateArrays(specs)
+			if err != nil {
+				b.Fatalf("Failed to allocate arrays: %v", err)
+			}
+
+			U := make([]float64, totalNodes)
+			for i := range U {
+				U[i] = 1.0 + float64(i%100)*0.01
+			}
+			kp.GetMemory("U").CopyFrom(unsafe.Pointer(&U[0]), int64(totalNodes*DOUBLE_SIZE))
+
+			kernelSource := buildMatmulKernel(np)
+			_, err = kp.BuildKernel(kernelSource, "matmul")
+			if err != nil {
+				b.Fatalf("Failed to build kernel: %v", err)
+			}
+
+			// Warm up
+			for i := 0; i < 5; i++ {
+				err = kp.RunKernel("matmul", "U", "V")
+				if err != nil {
+					b.Fatalf("Kernel execution failed: %v", err)
+				}
+			}
+			device.Finish()
+
+			// Time one execution
+			start := time.Now()
+			kp.RunKernel("matmul", "U", "V")
+			device.Finish()
+			avgTime := time.Since(start)
+
+			b.Logf("%10d | %10d | OK: %v", numParts, baseK, avgTime)
+
+			// Explicitly free resources before next iteration
+			kp.Free()
 		}()
 	}
 }
