@@ -27,6 +27,13 @@ import (
 // - Strong scaling: How partition granularity affects performance (no "speedup")
 // - Weak scaling: Efficiency of handling proportionally more work
 //
+// PERFORMANCE OBSERVATIONS:
+// - OpenMP showing significantly lower GFLOPS than Serial indicates potential issues:
+//   * Poor loop ordering preventing vectorization
+//   * False sharing between threads
+//   * Missing SIMD pragmas or compiler optimization flags
+//   * Suboptimal memory access patterns in the generated kernel
+//
 // COMPUTE KERNEL:
 // - Performs 3 sequential Dr matrix multiplies per iteration
 // - Repeats 3 iterations to increase arithmetic intensity
@@ -191,16 +198,16 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 	ops := float64(totalElements * np * np * 2 * matmulIterations) // 2 ops per multiply-add
 	gflops := (ops / 1e9) / avgTime.Seconds()
 
-	// Memory bandwidth calculation - improved to account for actual access patterns
-	// Each iteration moves:
-	// - Dr matrix reads: np×np elements × numPartitions × DOUBLE_SIZE
-	// - Vector reads/writes: 3 arrays × totalNodes × DOUBLE_SIZE × 2 (read+write)
-	// However, Dr is cached after first use, and vectors have reuse within iterations
-	drBytes := int64(np * np * len(K) * DOUBLE_SIZE)       // Dr reads per iteration
-	vectorBytes := int64(totalNodes * DOUBLE_SIZE * 3 * 2) // 3 arrays, read+write
-	// Estimate effective bandwidth assuming some cache reuse
-	effectiveBytesTransferred := (drBytes + vectorBytes) / 2 // Conservative estimate
-	bandwidth := float64(effectiveBytesTransferred) / avgTime.Seconds() / 1e9
+	// Memory bandwidth calculation based on operand streaming
+	// Each matrix-vector multiply requires:
+	// - Read each input element once (reused np times for the np multiply-adds)
+	// - Write each output element once
+	// - Dr matrix is static and cached, not counted in streaming bandwidth
+	// Total: 2 memory ops per element per matrix multiply
+	// With 9 matrix multiplies: 18 memory ops per element
+	// This represents the minimum bandwidth required for the computation
+	bytesTransferred := int64(18 * totalElements * np * DOUBLE_SIZE)
+	bandwidth := float64(bytesTransferred) / avgTime.Seconds() / 1e9
 
 	return benchResult{
 		avgTime:    avgTime,
@@ -614,8 +621,8 @@ func BenchmarkPerf_CUDA_RealisticScaling(b *testing.B) {
 	np := 56 // P=5: (6)(7)(8)/6 = 56 volume points
 
 	b.Log("\nCUDA Realistic Problem Sizes:")
-	b.Log("Elements   | Partitions | Elem/Part | Time/Iter | GFLOPS | Est. Bandwidth")
-	b.Log("-----------|------------|-----------|-----------|--------|---------------")
+	b.Log("Elements   | Partitions | Elem/Part | Time/Iter | GFLOPS | Memory BW")
+	b.Log("-----------|------------|-----------|-----------|--------|----------")
 
 	// Test realistic problem sizes
 	testCases := []struct {
@@ -659,7 +666,7 @@ func BenchmarkPerf_CUDA_RealisticScaling(b *testing.B) {
 
 			timeMs := float64(result.avgTime.Nanoseconds()) / 1e6
 
-			b.Logf("%10d | %10d | %9d | %8.1fms | %6.2f | %7.2f GB/s",
+			b.Logf("%10d | %10d | %9d | %8.1fms | %6.2f | %6.2f GB/s",
 				tc.totalElements, tc.partitions, elementsPerPart,
 				timeMs, result.gflops, result.bandwidth)
 		}()
