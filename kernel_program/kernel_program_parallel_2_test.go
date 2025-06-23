@@ -2,6 +2,7 @@ package kernel_program
 
 import (
 	"github.com/notargets/gocca"
+	"runtime"
 	"testing"
 	"time"
 	"unsafe"
@@ -18,13 +19,19 @@ func BenchmarkPerf_WeakScaling(b *testing.B) {
 	}
 
 	for _, config := range configs {
-		device, err := gocca.NewDevice(config.device)
-		if err != nil {
-			continue
-		}
-		defer device.Free()
-
 		b.Run(config.name+"_WeakScaling", func(b *testing.B) {
+			// CUDA requires thread affinity
+			if config.name == "CUDA" {
+				runtime.LockOSThread()
+				defer runtime.UnlockOSThread()
+			}
+
+			device, err := gocca.NewDevice(config.device)
+			if err != nil {
+				b.Skip("Device not available")
+			}
+			defer device.Free()
+
 			np := 32
 			baseWork := 512 // Reduced from 50000 to stay within CUDA limit
 
@@ -48,7 +55,6 @@ func BenchmarkPerf_WeakScaling(b *testing.B) {
 					K:         K,
 					FloatType: Float64,
 				})
-				defer kp.Free()
 
 				Dr := createTestMatrix(np, np)
 				kp.AddStaticMatrix("Dr", Dr)
@@ -121,6 +127,10 @@ func BenchmarkPerf_WeakScaling(b *testing.B) {
 
 				b.Logf("%10d | %10d | %9v | %9.1f%%",
 					numParts, baseWork*numParts, avgTime, efficiency)
+
+				// Clean up immediately to avoid CUDA context issues
+				kp.Free()
+				device.Finish()
 			}
 		})
 	}
@@ -137,13 +147,19 @@ func BenchmarkPerf_StrongScaling(b *testing.B) {
 	}
 
 	for _, config := range configs {
-		device, err := gocca.NewDevice(config.device)
-		if err != nil {
-			continue
-		}
-		defer device.Free()
-
 		b.Run(config.name+"_StrongScaling", func(b *testing.B) {
+			// CUDA requires thread affinity
+			if config.name == "CUDA" {
+				runtime.LockOSThread()
+				defer runtime.UnlockOSThread()
+			}
+
+			device, err := gocca.NewDevice(config.device)
+			if err != nil {
+				b.Skip("Device not available")
+			}
+			defer device.Free()
+
 			np := 32
 			totalWork := 4096 // Reduced from 200000, divisible by 1,2,4,8
 
@@ -175,7 +191,6 @@ func BenchmarkPerf_StrongScaling(b *testing.B) {
 					K:         K,
 					FloatType: Float64,
 				})
-				defer kp.Free()
 
 				Dr := createTestMatrix(np, np)
 				kp.AddStaticMatrix("Dr", Dr)
@@ -249,6 +264,10 @@ func BenchmarkPerf_StrongScaling(b *testing.B) {
 
 				b.Logf("%10d | %9d | %9v | %7.2fx | %9.1f%%",
 					numParts, workPerPart, avgTime, speedup, efficiency)
+
+				// Clean up immediately to avoid CUDA context issues
+				kp.Free()
+				device.Finish()
 			}
 		})
 	}
