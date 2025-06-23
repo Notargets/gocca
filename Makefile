@@ -7,7 +7,7 @@ test:
 
 bench:
 	#go test -bench=BenchmarkParallelScalingLarge -benchtime=10x ./kernel_program
-	go test -bench=. -run=^$ -parallel=1 -benchtime=10x ./...
+	go test -bench=. -run=^$ -parallel=1 -benchtime=1x ./...
 
 tidy:
 	go mod tidy

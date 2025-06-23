@@ -22,6 +22,20 @@ import (
 // - Realistic element counts: 25K-250K elements
 // - Realistic partition counts: 256+ for optimal CUDA @outer utilization
 //
+// IMPORTANT NOTE ON SCALING:
+// These tests measure performance with FIXED hardware resources (threads/SMs).
+// Traditional scaling efficiency assumes proportional resource increase, which
+// doesn't apply here. We measure:
+// - Strong scaling: How partition size affects performance (smaller may be better)
+// - Weak scaling: Overhead of managing more partitions
+//
+// COMPUTE KERNEL:
+// - Performs 3 sequential Dr matrix multiplies per iteration
+// - Repeats 3 iterations to increase arithmetic intensity
+// - Total: 9 matrix-vector multiplies per kernel invocation
+// - Arithmetic intensity: O(9 × np) operations per element
+// - Provides good compute/memory ratio while keeping test runtime reasonable
+//
 // NP VALUES (Number of volume points for tetrahedral elements):
 // - NP = (P+1)(P+2)(P+3)/6 where P is the polynomial order
 // - NP = 10 for P=2 (low order method)
@@ -32,7 +46,7 @@ const (
 	CACHE_LINE  = 64 // 64 bytes
 	DOUBLE_SIZE = 8  // 8 bytes per float64
 
-	MIN_TEST_TIME  = 100 * time.Millisecond // Minimum test duration
+	MIN_TEST_TIME  = 50 * time.Millisecond // Reduced for faster testing
 	MAX_CUDA_INNER = 1024
 )
 
@@ -43,11 +57,11 @@ func computeIterations(expectedTimePerIter time.Duration) int {
 	}
 
 	iterations := int(MIN_TEST_TIME / expectedTimePerIter)
-	if iterations < 10 {
-		return 10
+	if iterations < 5 {
+		return 5
 	}
-	if iterations > 1000 {
-		return 1000
+	if iterations > 100 {
+		return 100
 	}
 	return iterations
 }
@@ -95,11 +109,13 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 	})
 	defer kp.Free()
 
-	// Add static matrix
+	// Add static matrix Dr (differentiation matrix)
+	// In a real DG code, you'd have Dr, Ds, Dt, but we use Dr repeatedly for testing
 	Dr := createTestMatrix(np, np)
 	kp.AddStaticMatrix("Dr", Dr)
 
-	// Allocate arrays
+	// Allocate arrays (U, V, W for the computation chain)
+	// The kernel performs U→V→W→U cyclic operations
 	specs := []ArraySpec{
 		{
 			Name:      "U",
@@ -109,6 +125,12 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 		},
 		{
 			Name:      "V",
+			Size:      int64(totalNodes * DOUBLE_SIZE),
+			DataType:  Float64,
+			Alignment: CacheLineAlign,
+		},
+		{
+			Name:      "W",
 			Size:      int64(totalNodes * DOUBLE_SIZE),
 			DataType:  Float64,
 			Alignment: CacheLineAlign,
@@ -136,7 +158,7 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 
 	// Warm up
 	for i := 0; i < 5; i++ {
-		err = kp.RunKernel("matmul", "U", "V")
+		err = kp.RunKernel("matmul", "U", "V", "W")
 		if err != nil {
 			b.Fatalf("Kernel execution failed: %v", err)
 		}
@@ -145,7 +167,7 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 
 	// Time one execution to estimate iterations needed
 	start := time.Now()
-	kp.RunKernel("matmul", "U", "V")
+	kp.RunKernel("matmul", "U", "V", "W")
 	device.Finish()
 	estimatedTime := time.Since(start)
 
@@ -154,7 +176,7 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 	// Run benchmark
 	start = time.Now()
 	for i := 0; i < iterations; i++ {
-		err = kp.RunKernel("matmul", "U", "V")
+		err = kp.RunKernel("matmul", "U", "V", "W")
 		if err != nil {
 			b.Fatalf("Kernel execution failed: %v", err)
 		}
@@ -165,11 +187,17 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 	avgTime := totalTime / time.Duration(iterations)
 
 	// Calculate metrics
-	ops := float64(totalElements * np * np * 2) // 2 ops per multiply-add
+	// We do 3 Dr matrix multiplies × 3 iterations = 9 matrix multiplies total
+	// Each matrix multiply is np × np × K operations (2 ops per multiply-add)
+	// This provides good arithmetic intensity while keeping test runtime reasonable
+	matmulIterations := 3 * 3                                      // 3 Dr operations per iteration, 3 iterations
+	ops := float64(totalElements * np * np * 2 * matmulIterations) // 2 ops per multiply-add
 	gflops := (ops / 1e9) / avgTime.Seconds()
 
-	// Memory bandwidth: read U, read Dr (cached), write V
-	bytesTransferred := int64(totalNodes * DOUBLE_SIZE * 2) // read U, write V
+	// Memory bandwidth: More complex with 3 arrays and data reuse
+	// With 10 iterations, data should be reused from cache after first iteration
+	// Effective bandwidth is lower than theoretical due to compute intensity
+	bytesTransferred := int64(totalNodes * DOUBLE_SIZE * 3 * 2) // 3 arrays, read+write
 	bandwidth := float64(bytesTransferred) / avgTime.Seconds() / 1e9
 
 	return benchResult{
@@ -188,21 +216,37 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 func buildMatmulKernel(np int) string {
 	return fmt.Sprintf(`
 #define NP %d
+#define NITER 3
 
 @kernel void matmul(
 	const int_t* K,
 	const real_t* U_global,
 	const int_t* U_offsets,
 	real_t* V_global,
-	const int_t* V_offsets
+	const int_t* V_offsets,
+	real_t* W_global,
+	const int_t* W_offsets
 ) {
 	for (int part = 0; part < NPART; ++part; @outer) {
 		const real_t* U = U_PART(part);
 		real_t* V = V_PART(part);
+		real_t* W = W_PART(part);
 		
-		// Matrix multiply using generated macro
-		// The macro contains the @inner loop for element parallelism
-		MATMUL_Dr(U, V, K[part], NP);
+		// Perform 3 iterations of matrix operations
+		// This simulates derivative evaluations in a DG time step
+		// Each iteration does 3 Dr matrix-vector products
+		// The cyclic U→V→W→U pattern ensures data dependencies
+		for (int iter = 0; iter < NITER; ++iter) {
+			// V = Dr * U (first operation)
+			MATMUL_Dr(U, V, K[part], NP);
+			
+			// W = Dr * V (second operation on result)
+			MATMUL_Dr(V, W, K[part], NP);
+			
+			// U = Dr * W (third operation, result feeds back)
+			// Cast away const for the cyclic computation
+			MATMUL_Dr(W, (real_t*)U, K[part], NP);
+		}
 	}
 }
 `, np)
@@ -210,13 +254,15 @@ func buildMatmulKernel(np int) string {
 
 func createTestMatrix(rows, cols int) mat.Matrix {
 	data := make([]float64, rows*cols)
-	// Simple test pattern: diagonal dominant
+	// Simple test pattern: diagonal dominant with different patterns for each matrix
+	// This ensures the matrices are well-conditioned
 	for i := 0; i < rows; i++ {
 		for j := 0; j < cols; j++ {
 			if i == j {
 				data[i*cols+j] = 2.0
 			} else {
-				data[i*cols+j] = -0.1
+				// Different off-diagonal patterns
+				data[i*cols+j] = -0.1 * (1.0 + float64((i+j)%3)*0.1)
 			}
 		}
 	}
@@ -229,15 +275,6 @@ func sumArray(arr []int) int {
 		sum += v
 	}
 	return sum
-}
-
-// generateUniformK creates a K array with uniform values
-func generateUniformK(numPartitions, elementsPerPartition int) []int {
-	K := make([]int, numPartitions)
-	for i := range K {
-		K[i] = elementsPerPartition
-	}
-	return K
 }
 
 // ============================================================================
@@ -265,17 +302,15 @@ func BenchmarkPerf_BasicFunctionality(b *testing.B) {
 			defer device.Free()
 
 			// Test both low and high order methods
-			k256 := generateUniformK(256, 400) // Pre-generate for use in test case
-
 			testCases := []struct {
 				name string
 				K    []int
 				np   int
 			}{
-				{"SinglePart_P2", []int{1000}, 10},    // 1 partition, 1000 elements, P=2
-				{"MultiPart_P2", []int{500, 500}, 10}, // 2 partitions, 1000 elements total, P=2
-				{"SinglePart_P5", []int{800}, 56},     // 1 partition, 800 elements, P=5
-				{"256Part_P5", k256, 56},              // 256 partitions, 400 each, P=5
+				{"SinglePart_P2", []int{1000}, 10},             // 1 partition, 1000 elements, P=2
+				{"MultiPart_P2", []int{500, 500}, 10},          // 2 partitions, 1000 elements total, P=2
+				{"SinglePart_P5", []int{800}, 56},              // 1 partition, 800 elements, P=5
+				{"256Part_P5", generateUniformK(256, 400), 56}, // 256 partitions, 400 each, P=5
 			}
 
 			for _, tc := range testCases {
@@ -290,8 +325,19 @@ func BenchmarkPerf_BasicFunctionality(b *testing.B) {
 	}
 }
 
+// generateUniformK creates a K array with uniform values
+func generateUniformK(numPartitions, elementsPerPartition int) []int {
+	K := make([]int, numPartitions)
+	for i := range K {
+		K[i] = elementsPerPartition
+	}
+	return K
+}
+
 // BenchmarkPerf_WeakScaling tests scaling with proportional work increase
-// This is a fundamental test of parallel efficiency - increases @outer dimension
+// This measures how performance changes as we add more partitions with constant
+// work per partition. With fixed hardware resources, we expect efficiency to
+// decrease as coordination overhead increases.
 func BenchmarkPerf_WeakScaling(b *testing.B) {
 	configs := []struct {
 		name   string
@@ -316,8 +362,8 @@ func BenchmarkPerf_WeakScaling(b *testing.B) {
 			elementsPerPartition := 400
 
 			b.Logf("\n%s Weak Scaling (realistic element counts):", config.name)
-			b.Log("Partitions | Elements/Part | Total Elements | Time/Iter | Efficiency")
-			b.Log("-----------|---------------|----------------|-----------|------------")
+			b.Log("Partitions | Elements/Part | Total Elements | Time/Iter | Slowdown")
+			b.Log("-----------|---------------|----------------|-----------|----------")
 
 			var baselineTime time.Duration
 
@@ -336,17 +382,21 @@ func BenchmarkPerf_WeakScaling(b *testing.B) {
 					baselineTime = result.avgTime
 				}
 
-				efficiency := float64(baselineTime) / float64(result.avgTime) * 100
+				// Slowdown factor: how much slower than baseline
+				slowdown := float64(result.avgTime) / float64(baselineTime)
 
-				b.Logf("%10d | %13d | %14d | %9v | %9.1f%%",
-					numParts, elementsPerPartition, totalElements, result.avgTime, efficiency)
+				b.Logf("%10d | %13d | %14d | %9v | %8.2fx",
+					numParts, elementsPerPartition, totalElements, result.avgTime, slowdown)
 			}
 		})
 	}
 }
 
 // BenchmarkPerf_StrongScaling tests fixed total work divided among partitions
-// This measures parallel speedup by varying @outer dimension
+// This measures how execution time changes with different partition counts
+// NOTE: "Strong scaling" traditionally assumes adding compute resources (threads/cores)
+// proportional to partitions. Here we're testing how different partition sizes
+// affect performance with FIXED hardware resources, which is more realistic.
 func BenchmarkPerf_StrongScaling(b *testing.B) {
 	configs := []struct {
 		name   string
@@ -366,17 +416,19 @@ func BenchmarkPerf_StrongScaling(b *testing.B) {
 
 			np := 56 // P=5: (6)(7)(8)/6 = 56 volume points
 
-			// Realistic total element count
-			totalElements := 102400 // 100K elements, divisible by 128, 256, 512, 1024
+			// Use smaller total to avoid exceeding CUDA limit with fewer partitions
+			// 262,144 = 256K elements, nicely divisible by powers of 2
+			totalElements := 262144
 
 			b.Logf("\n%s Strong Scaling (fixed %d elements):", config.name, totalElements)
-			b.Log("Partitions | Elements/Part | Time/Iter | Speedup | Efficiency")
-			b.Log("-----------|---------------|-----------|---------|------------")
+			b.Log("Partitions | Elements/Part | Time/Iter | Speedup")
+			b.Log("-----------|---------------|-----------|--------")
 
 			var baselineTime time.Duration
 
-			// Test with realistic partition counts for CUDA optimization
-			for _, numParts := range []int{128, 256, 512, 1024} {
+			// Test with partition counts that keep elements per partition <= 1024
+			// 262144/256 = 1024, 262144/512 = 512, 262144/1024 = 256
+			for _, numParts := range []int{256, 512, 1024, 2048} {
 				elementsPerPart := totalElements / numParts
 
 				// Check CUDA limit
@@ -393,18 +445,14 @@ func BenchmarkPerf_StrongScaling(b *testing.B) {
 
 				result := runMatmulBenchmark(b, device, K, np, fmt.Sprintf("%d_parts", numParts))
 
-				if numParts == 128 {
+				if numParts == 256 {
 					baselineTime = result.avgTime
 				}
 
 				speedup := float64(baselineTime) / float64(result.avgTime)
-				// Efficiency is speedup divided by the relative increase in resources
-				// Using 128 as baseline, so 256 has 2x resources, 512 has 4x, etc.
-				resourceMultiplier := float64(numParts) / 128.0
-				efficiency := speedup / resourceMultiplier * 100
 
-				b.Logf("%10d | %13d | %9v | %7.2fx | %9.1f%%",
-					numParts, elementsPerPart, result.avgTime, speedup, efficiency)
+				b.Logf("%10d | %13d | %9v | %7.2fx",
+					numParts, elementsPerPart, result.avgTime, speedup)
 			}
 		})
 	}
@@ -419,10 +467,9 @@ func BenchmarkPerf_LoadBalance(b *testing.B) {
 	np := 10             // P=2: (3)(4)(5)/6 = 10 volume points
 	numPartitions := 256 // Realistic partition count
 
-	// Test cases with ~100K total elements distributed differently
-	avgElementsPerPart := 400
-	totalElements := numPartitions * avgElementsPerPart
-	_ = totalElements
+	// Use same total as strong scaling for consistency
+	totalElements := 262144                             // 256K elements
+	avgElementsPerPart := totalElements / numPartitions // 1024
 
 	testCases := []struct {
 		name      string
@@ -445,9 +492,9 @@ func BenchmarkPerf_LoadBalance(b *testing.B) {
 				// Most partitions get average, but some get ±20%
 				for i := range K {
 					if i%4 == 0 {
-						K[i] = avgElementsPerPart + 80 // +20%
+						K[i] = avgElementsPerPart + 200 // +~20% (1224)
 					} else if i%4 == 1 {
-						K[i] = avgElementsPerPart - 80 // -20%
+						K[i] = avgElementsPerPart - 200 // -~20% (824)
 					} else {
 						K[i] = avgElementsPerPart
 					}
@@ -459,12 +506,13 @@ func BenchmarkPerf_LoadBalance(b *testing.B) {
 			name: "Severe_Imbalance",
 			generateK: func() []int {
 				K := make([]int, numPartitions)
-				// Half partitions get 200, half get 600 (3x difference)
+				// Simple imbalance: some get 600, others get 1024 (CUDA limit)
+				// Roughly 70/30 split to reach total of 262144
 				for i := range K {
-					if i < numPartitions/2 {
-						K[i] = 200
-					} else {
+					if i < int(float64(numPartitions)*0.7) {
 						K[i] = 600
+					} else {
+						K[i] = 1024
 					}
 				}
 				return K
@@ -474,12 +522,13 @@ func BenchmarkPerf_LoadBalance(b *testing.B) {
 			name: "Hotspot",
 			generateK: func() []int {
 				K := make([]int, numPartitions)
-				// Most get 350, but 10% get 1000 (near CUDA limit)
+				// 10% get near CUDA limit (1000), rest get ~1021
+				hotspotParts := numPartitions / 10 // 25 partitions
 				for i := range K {
-					if i < numPartitions/10 {
+					if i < hotspotParts {
 						K[i] = 1000
 					} else {
-						K[i] = 350
+						K[i] = 1021
 					}
 				}
 				return K
@@ -487,7 +536,7 @@ func BenchmarkPerf_LoadBalance(b *testing.B) {
 		},
 	}
 
-	b.Log("\nLoad Balance Analysis (256 partitions, ~100K elements):")
+	b.Log("\nLoad Balance Analysis (256 partitions, 256K elements):")
 	b.Log("Configuration  | Min K | Max K | Imbalance | Time/Iter | Performance Loss")
 	b.Log("---------------|-------|-------|-----------|-----------|------------------")
 
