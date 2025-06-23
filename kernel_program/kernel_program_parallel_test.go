@@ -1,7 +1,13 @@
 package kernel_program
 
 import (
+	"bufio"
 	"fmt"
+	"math"
+	"os"
+	"runtime"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unsafe"
@@ -303,21 +309,159 @@ func generateUniformK(numPartitions, elementsPerPartition int) []int {
 // ============================================================================
 // ESSENTIAL PERFORMANCE TESTS
 // ============================================================================
+// 2. Add this struct before BenchmarkPerf_BasicFunctionality:
+type testResult struct {
+	name   string
+	timeMs float64
+	gflops float64
+	device string
+}
 
-// BenchmarkPerf_BasicFunctionality tests single and multi-partition baseline
-// This establishes that the system works with realistic element counts
+// getPhysicalCoreCountLinux reads /proc/cpuinfo to get actual physical core count
+func getPhysicalCoreCountLinux() (int, error) {
+	file, err := os.Open("/proc/cpuinfo")
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	physicalIDs := make(map[string]bool)
+	coreIDs := make(map[string]map[string]bool)
+
+	scanner := bufio.NewScanner(file)
+	var currentPhysicalID string
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if strings.HasPrefix(line, "physical id") {
+			parts := strings.Split(line, ":")
+			if len(parts) == 2 {
+				currentPhysicalID = strings.TrimSpace(parts[1])
+				physicalIDs[currentPhysicalID] = true
+				if coreIDs[currentPhysicalID] == nil {
+					coreIDs[currentPhysicalID] = make(map[string]bool)
+				}
+			}
+		} else if strings.HasPrefix(line, "core id") {
+			parts := strings.Split(line, ":")
+			if len(parts) == 2 && currentPhysicalID != "" {
+				coreID := strings.TrimSpace(parts[1])
+				coreIDs[currentPhysicalID][coreID] = true
+			}
+		}
+	}
+
+	// Count total unique physical cores
+	totalCores := 0
+	for _, cores := range coreIDs {
+		totalCores += len(cores)
+	}
+
+	if totalCores > 0 {
+		return totalCores, nil
+	}
+
+	// Fallback: count unique core IDs if physical ID not available
+	uniqueCores := make(map[string]bool)
+	file.Seek(0, 0)
+	scanner = bufio.NewScanner(file)
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "core id") {
+			parts := strings.Split(line, ":")
+			if len(parts) == 2 {
+				coreID := strings.TrimSpace(parts[1])
+				uniqueCores[coreID] = true
+			}
+		}
+	}
+
+	if len(uniqueCores) > 0 {
+		return len(uniqueCores), nil
+	}
+
+	return 0, scanner.Err()
+}
+
+// getPhysicalCoreCount with enhanced Linux detection
+func getPhysicalCoreCount() int {
+	// Try Linux-specific detection first
+	if runtime.GOOS == "linux" {
+		if cores, err := getPhysicalCoreCountLinux(); err == nil && cores > 0 {
+			return cores
+		}
+	}
+
+	// Fallback to simple heuristic
+	logicalCores := runtime.NumCPU()
+	if logicalCores >= 16 && logicalCores%2 == 0 {
+		return logicalCores / 2
+	}
+	return logicalCores
+}
 func BenchmarkPerf_BasicFunctionality(b *testing.B) {
-	configs := []struct {
+	// System info
+	logicalCores := runtime.NumCPU()
+	physicalCores := getPhysicalCoreCount()
+
+	// Storage for baseline serial results
+	serialBaselines := make(map[int]float64) // np -> time in ms
+	var mu sync.Mutex
+
+	// First, run Serial tests to establish baselines
+	b.Run("Serial_Baseline", func(b *testing.B) {
+		device, err := gocca.NewDevice(`{"mode": "Serial"}`)
+		if err != nil {
+			b.Skip("Serial device not available")
+		}
+		defer device.Free()
+
+		// Only run single partition tests for baseline
+		baselineTests := []struct {
+			name string
+			K    []int
+			np   int
+		}{
+			{"SinglePart_P2", []int{1000}, 10},
+			{"SinglePart_P5", []int{800}, 56},
+		}
+
+		for _, tc := range baselineTests {
+			result := runMatmulBenchmark(b, device, tc.K, tc.np, tc.name)
+			timeMs := float64(result.avgTime.Nanoseconds()) / 1e6
+
+			mu.Lock()
+			serialBaselines[tc.np] = timeMs
+			mu.Unlock()
+
+			b.Logf("Serial %s: %d elements, np=%d, time=%.1fms, GFLOPS=%.2f",
+				tc.name, tc.K[0], tc.np, timeMs, result.gflops)
+		}
+	})
+
+	// Results storage for parallel backends
+	type parallelResult struct {
+		device    string
+		testName  string
+		partCount int
+		np        int
+		timeMs    float64
+		gflops    float64
+	}
+	var parallelResults []parallelResult
+
+	// Test parallel backends
+	parallelConfigs := []struct {
 		name   string
 		device string
 	}{
-		{"Serial", `{"mode": "Serial"}`},
-		// {"OpenCL", `{"mode": "OpenCL", "device_id": 0, "platform_id": 0}`},
-		{"OpenMP", `{"mode": "OpenMP"}`},
+		{"OpenMP", `{"mode": "OpenMP", "kernel": {"compiler_flags": "-O3"}}`},
 		{"CUDA", `{"mode": "CUDA", "device_id": 0}`},
 	}
 
-	for _, config := range configs {
+	for _, config := range parallelConfigs {
 		b.Run(config.name, func(b *testing.B) {
 			device, err := gocca.NewDevice(config.device)
 			if err != nil {
@@ -325,16 +469,30 @@ func BenchmarkPerf_BasicFunctionality(b *testing.B) {
 			}
 			defer device.Free()
 
-			// Test both low and high order methods
+			// Test multiple partition counts - WEAK SCALING
+			// Each partition has the same number of elements
+			const elementsPerPartP2 = 1000
+			const elementsPerPartP5 = 800
+
 			testCases := []struct {
-				name string
-				K    []int
-				np   int
+				name      string
+				K         []int
+				np        int
+				partCount int
 			}{
-				{"SinglePart_P2", []int{1000}, 10},             // 1 partition, 1000 elements, P=2
-				{"MultiPart_P2", []int{500, 500}, 10},          // 2 partitions, 1000 elements total, P=2
-				{"SinglePart_P5", []int{800}, 56},              // 1 partition, 800 elements, P=5
-				{"256Part_P5", generateUniformK(256, 400), 56}, // 256 partitions, 400 each, P=5
+				// P2 tests - each partition has 1000 elements
+				{"1Part_P2", []int{elementsPerPartP2}, 10, 1},
+				{"2Part_P2", generateUniformK(2, elementsPerPartP2), 10, 2},
+				{"64Part_P2", generateUniformK(64, elementsPerPartP2), 10, 64},
+				{"128Part_P2", generateUniformK(128, elementsPerPartP2), 10, 128},
+				{"256Part_P2", generateUniformK(256, elementsPerPartP2), 10, 256},
+
+				// P5 tests - each partition has 800 elements
+				{"1Part_P5", []int{elementsPerPartP5}, 56, 1},
+				{"2Part_P5", generateUniformK(2, elementsPerPartP5), 56, 2},
+				{"64Part_P5", generateUniformK(64, elementsPerPartP5), 56, 64},
+				{"128Part_P5", generateUniformK(128, elementsPerPartP5), 56, 128},
+				{"256Part_P5", generateUniformK(256, elementsPerPartP5), 56, 256},
 			}
 
 			for _, tc := range testCases {
@@ -342,12 +500,104 @@ func BenchmarkPerf_BasicFunctionality(b *testing.B) {
 
 				totalElements := sumArray(tc.K)
 				timeMs := float64(result.avgTime.Nanoseconds()) / 1e6
+
+				mu.Lock()
+				parallelResults = append(parallelResults, parallelResult{
+					device:    config.name,
+					testName:  tc.name,
+					partCount: tc.partCount,
+					np:        tc.np,
+					timeMs:    timeMs,
+					gflops:    result.gflops,
+				})
+				mu.Unlock()
+
 				b.Logf("%s %s: %d partitions, %d total elements, np=%d, time=%.1fms, GFLOPS=%.2f",
-					config.name, tc.name, len(tc.K), totalElements, tc.np,
+					config.name, tc.name, tc.partCount, totalElements, tc.np,
 					timeMs, result.gflops)
 			}
 		})
 	}
+
+	// Speedup Analysis
+	b.Run("SpeedupAnalysis", func(b *testing.B) {
+		b.Logf("\n========== Speedup Analysis ==========")
+		b.Logf("System: %d physical cores, %d logical cores", physicalCores, logicalCores)
+		if physicalCores < logicalCores {
+			b.Logf("Hyperthreading detected: using physical core count for theoretical speedup")
+		}
+		b.Logf("Theoretical Linear Speedup: %dx (%d%%)\n", physicalCores, physicalCores*100)
+
+		// Group results by device and np
+		for _, device := range []string{"OpenMP", "CUDA"} {
+			b.Logf("\n--- %s Performance ---", device)
+
+			for _, np := range []int{10, 56} { // P2 and P5
+				baseline, hasBaseline := serialBaselines[np]
+				if !hasBaseline {
+					continue
+				}
+
+				b.Logf("\nP=%d (np=%d), Serial baseline: %.3f ms",
+					int(math.Sqrt(float64(np))), np, baseline)
+
+				// Find all results for this device and np
+				for _, r := range parallelResults {
+					if r.device == device && r.np == np {
+						// WEAK SCALING: multiply by partition count
+						speedup := float64(r.partCount) * (baseline / r.timeMs)
+						percentSpeedup := speedup * 100.0
+
+						if device == "CUDA" {
+							b.Logf("  %3d partitions: %6.1f ms, speedup=%5.1fx (%6.0f%%)",
+								r.partCount, r.timeMs, speedup, percentSpeedup)
+						} else {
+							efficiency := (speedup / float64(physicalCores)) * 100.0
+							b.Logf("  %3d partitions: %6.1f ms, speedup=%5.1fx (%6.0f%%), efficiency=%5.1f%%",
+								r.partCount, r.timeMs, speedup, percentSpeedup, efficiency)
+						}
+					}
+				}
+			}
+		}
+
+		// Highlight best results
+		b.Logf("\n--- Best Results (256 partitions) ---")
+		for _, np := range []int{10, 56} {
+			baseline, hasBaseline := serialBaselines[np]
+			if !hasBaseline {
+				continue
+			}
+
+			b.Logf("\nP=%d (np=%d):", int(math.Sqrt(float64(np))), np)
+
+			for _, device := range []string{"OpenMP", "CUDA"} {
+				// Find 256 partition result
+				for _, r := range parallelResults {
+					if r.device == device && r.np == np && r.partCount == 256 {
+						// WEAK SCALING: multiply by partition count
+						speedup := float64(r.partCount) * (baseline / r.timeMs)
+						percentSpeedup := speedup * 100.0
+
+						if device == "CUDA" {
+							b.Logf("  %s: %.1fx speedup (%6.0f%%)",
+								device, speedup, percentSpeedup)
+						} else {
+							efficiency := (speedup / float64(physicalCores)) * 100.0
+							b.Logf("  %s: %.1fx speedup (%6.0f%%), efficiency=%.1f%%",
+								device, speedup, percentSpeedup, efficiency)
+
+							if speedup > float64(physicalCores) {
+								b.Logf("    ^^^ Super-linear speedup! Better cache utilization")
+							}
+						}
+					}
+				}
+			}
+		}
+
+		b.Logf("\n=====================================")
+	})
 }
 
 // BenchmarkPerf_WeakScaling tests scaling with proportional work increase
