@@ -94,6 +94,11 @@ func NewKernelProgram(device *gocca.OCCADevice, cfg Config) *KernelProgram {
 		}
 	}
 
+	// Check CUDA @inner limit
+	if device.Mode() == "CUDA" && kpartMax > 1024 {
+		panic(fmt.Sprintf("CUDA @inner limit exceeded: KpartMax=%d but CUDA is limited to 1024 threads per @inner loop. Reduce partition sizes.", kpartMax))
+	}
+
 	// Set defaults
 	floatType := cfg.FloatType
 	if floatType == 0 {
