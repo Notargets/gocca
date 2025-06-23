@@ -2,6 +2,7 @@ package kernel_program
 
 import (
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 	"unsafe"
@@ -677,48 +678,23 @@ func BenchmarkPerf_MemoryPressure(b *testing.B) {
 	}
 }
 
-// BenchmarkPerf_CompareBackends compares performance across available backends
-func BenchmarkPerf_CompareBackends(b *testing.B) {
-	backends := []struct {
-		name   string
-		config string
-	}{
-		{"Serial", `{"mode": "Serial"}`},
-		{"OpenMP", `{"mode": "OpenMP"}`},
-		{"CUDA", `{"mode": "CUDA", "device_id": 0}`},
+// BenchmarkPerf_CUDA_Simple tests CUDA performance in isolation
+func BenchmarkPerf_CUDA_Simple(b *testing.B) {
+	// Lock to OS thread for CUDA
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	device, err := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
+	if err != nil {
+		b.Skip("CUDA device not available")
 	}
+	defer device.Free()
 
-	np := 32
-	K := []int{50000}
+	np := 10          // Smaller np
+	K := []int{10000} // Single partition, smaller size
 
-	b.Log("\nBackend Performance Comparison:")
-	b.Log("Backend | Available | Time/Iter | GFLOPS | Speedup")
-	b.Log("--------|-----------|-----------|--------|----------")
+	// Run the benchmark
+	result := runMatmulBenchmark(b, device, K, np, "CUDA")
 
-	var serialTime time.Duration
-
-	for i, backend := range backends {
-		device, err := gocca.NewDevice(backend.config)
-		if err != nil {
-			b.Logf("%-7s | %9s | %9s | %6s | %8s",
-				backend.name, "No", "-", "-", "-")
-			continue
-		}
-
-		result := runMatmulBenchmark(b, device, K, np, backend.name)
-
-		if i == 0 {
-			serialTime = result.avgTime
-		}
-		speedup := float64(serialTime) / float64(result.avgTime)
-
-		b.Logf("%-7s | %9s | %9v | %6.2f | %7.2fx",
-			backend.name, "Yes", result.avgTime, result.gflops, speedup)
-
-		// Ensure all operations complete before freeing device
-		device.Finish()
-
-		// Free device immediately after use to avoid CUDA context issues
-		device.Free()
-	}
+	b.Logf("CUDA: time=%v, GFLOPS=%.2f", result.avgTime, result.gflops)
 }
