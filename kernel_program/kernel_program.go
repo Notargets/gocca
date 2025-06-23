@@ -493,8 +493,20 @@ func (kp *KernelProgram) BuildKernel(kernelSource, kernelName string) (*gocca.OC
 	// Combine preamble with kernel source
 	fullSource := kp.kernelPreamble + "\n" + kernelSource
 
-	// Build kernel
-	kernel, err := kp.device.BuildKernelFromString(fullSource, kernelName, nil)
+	// Build kernel with OpenMP optimization fix
+	var kernel *gocca.OCCAKernel
+	var err error
+
+	if kp.device.Mode() == "OpenMP" {
+		// Workaround for OCCA bug: OpenMP doesn't get default -O3 flag
+		props := gocca.JsonParse(`{"compiler_flags": "-O3"}`)
+		defer props.Free()
+		kernel, err = kp.device.BuildKernelFromString(fullSource, kernelName, props)
+	} else {
+		// Other devices work correctly with default flags
+		kernel, err = kp.device.BuildKernelFromString(fullSource, kernelName, nil)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to build kernel %s: %w", kernelName, err)
 	}
