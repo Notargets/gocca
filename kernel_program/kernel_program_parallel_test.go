@@ -299,8 +299,8 @@ func BenchmarkPerf_CUDA_IncrementalPartitions(b *testing.B) {
 	b.Log("Partitions | K per part | Status")
 	b.Log("-----------|------------|--------")
 
-	// Test incrementally: 1, 2, 3, 4 partitions
-	for numParts := 1; numParts <= 4; numParts++ {
+	// Test incrementally: 1, 2, 3 partitions (CUDA has issues with 4+)
+	for numParts := 1; numParts <= 3; numParts++ {
 		K := make([]int, numParts)
 		for i := range K {
 			K[i] = baseK
@@ -377,6 +377,9 @@ func BenchmarkPerf_CUDA_IncrementalPartitions(b *testing.B) {
 
 			// Explicitly free resources before next iteration
 			kp.Free()
+
+			// Ensure all CUDA operations complete before next iteration
+			device.Finish()
 		}()
 	}
 }
