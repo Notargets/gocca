@@ -70,3 +70,38 @@ func GetGoccaVersion() string {
 func GetVersionInfo() string {
 	return fmt.Sprintf("GoCCA %s with OCCA %s", GetGoccaVersion(), GetOccaVersion())
 }
+
+// Version returns the OCCA version string (for api_completeness_test.go)
+func Version() string {
+	return OccaVersionStr
+}
+
+// VersionNumber returns the OCCA version as a formatted string "major.minor.patch"
+func VersionNumber() string {
+	return GetOccaVersion()
+}
+
+// HeaderVersion returns the OCCA header version string (same as Version for compatibility)
+func HeaderVersion() string {
+	return Version()
+}
+
+// HeaderVersionNumber returns the OCCA header version number (same as VersionNumber for compatibility)
+func HeaderVersionNumber() string {
+	return VersionNumber()
+}
+
+// GetMajorVersion returns the OCCA major version number
+func GetMajorVersion() int {
+	return OccaMajorVersion
+}
+
+// GetMinorVersion returns the OCCA minor version number
+func GetMinorVersion() int {
+	return OccaMinorVersion
+}
+
+// GetPatchVersion returns the OCCA patch version number
+func GetPatchVersion() int {
+	return OccaPatchVersion
+}
