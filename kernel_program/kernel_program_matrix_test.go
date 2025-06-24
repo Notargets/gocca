@@ -80,7 +80,7 @@ func TestKernelProgram_MatrixMultiplication_KnownAnswer(t *testing.T) {
 	for (int part = 0; part < NPART; ++part; @outer) {
 		const real_t* U = U_PART(part);
 		real_t* V = V_PART(part);
-		MATMUL_TestMat(U, V, K[part], NP);
+		MATMUL_TestMat(U, V, K[part]);
 	}
 }
 `, np)
@@ -328,7 +328,7 @@ func TestKernelProgram_MultipleArraysWithMatMul(t *testing.T) {
 		real_t* MU = MU_PART(part);
 		
 		// Apply differentiation to U
-		MATMUL_Dr(U, DU, K[part], NP);
+		MATMUL_Dr(U, DU, K[part]);
 		
 		// Apply mass matrix to U+V
 		for (int elem = 0; elem < KpartMax; ++elem; @inner) {

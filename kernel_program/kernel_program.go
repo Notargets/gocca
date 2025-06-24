@@ -674,6 +674,11 @@ func CopyPartitionToHost[T any](kp *KernelProgram, name string, partitionID int)
 			metadata.dataType, requestedType)
 	}
 
+	// Handle empty partition case - return empty slice immediately
+	if kp.K[partitionID] == 0 {
+		return make([]T, 0), nil
+	}
+
 	// Get memory and offsets
 	memory := kp.GetMemory(name)
 	if memory == nil {
