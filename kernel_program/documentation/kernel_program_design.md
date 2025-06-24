@@ -45,7 +45,7 @@ int KpartMax = max(K[0], K[1], ..., K[NPART-1]);
 // @outer: partition-level parallelism
 for (int part = 0; part < NPART; ++part; @outer) {
     // Macro contains @inner: element-level parallelism (padded to KpartMax)
-    MATMUL_Dr(U, RHS, K[part], NP);
+    MATMUL_Dr(U, RHS, K[part]);
     // The macro expands to include:
     // for (int elem = 0; elem < KpartMax; ++elem; @inner) {
     //     if (elem < K[part]) { /* work */ }
@@ -70,26 +70,26 @@ for (int part = 0; part < NPART; ++part; @outer) {
 
 ```go
 type KernelProgram struct {
-// Partition configuration
-NumPartitions int
-K []int // Variable elements per partition
-
-// Type configuration
-FloatType, IntType DataType
-
-// Static data for embedding
-StaticMatrices map[string]Matrix
-
-// Array tracking for macro generation
-allocatedArrays []string
-
-// Generated code
-kernelPreamble string
-
-// Runtime resources
-device *gocca.OCCADevice
-kernels map[string]*gocca.OCCAKernel
-pooledMemory map[string]*gocca.OCCAMemory
+    // Partition configuration
+    NumPartitions int
+    K []int // Variable elements per partition
+    
+    // Type configuration
+    FloatType, IntType DataType
+    
+    // Static data for embedding
+    StaticMatrices map[string]Matrix
+    
+    // Array tracking for macro generation
+    allocatedArrays []string
+    
+    // Generated code
+    kernelPreamble string
+    
+    // Runtime resources
+    device *gocca.OCCADevice
+    kernels map[string]*gocca.OCCAKernel
+    pooledMemory map[string]*gocca.OCCAMemory
 }
 ```
 
@@ -104,9 +104,9 @@ Users define their memory requirements through ArraySpec:
 
 ```go
 type ArraySpec struct {
-Name      string
-Size      int64         // Total size in bytes
-Alignment AlignmentType // Alignment requirement
+    Name      string
+    Size      int64         // Total size in bytes
+    Alignment AlignmentType // Alignment requirement
 }
 ```
 
@@ -122,12 +122,6 @@ Kernels must follow the @outer/@inner pattern with element bounds checking:
     real_t* RHS_global,
     const int_t* RHS_offsets
 ) {
-    // Precompute maximum K for @inner padding
-    int KpartMax = 0;
-    for (int p = 0; p < NPART; ++p) {
-        if (K[p] > KpartMax) KpartMax = K[p];
-    }
-    
     for (int part = 0; part < NPART; ++part; @outer) {
         // Get partition data pointers
         const real_t* U = U_PART(part);
@@ -135,7 +129,7 @@ Kernels must follow the @outer/@inner pattern with element bounds checking:
         int K_part = K[part];
         
         // Matrix multiply macro contains @inner loop
-        MATMUL_Dr(U, RHS, K_part, KpartMax, NP);
+        MATMUL_Dr(U, RHS, K_part);
     }
 }
 ```
@@ -168,18 +162,56 @@ const real_t Dr[20][20] = { /* values */ };
 ### Matrix Multiplication Macros with @inner
 
 Matrix multiplication macros contain the @inner loop for element-level
-parallelism:
+parallelism. The macros automatically infer stride information from the
+static matrix dimensions:
+
+For a static matrix of dimensions M×N:
+- Input stride: N (number of columns)
+- Output stride: M (number of rows)
+
+Two variants are generated for each matrix:
+- `MATMUL_<name>`: Standard multiply (OUT = Matrix × IN)
+- `MATMUL_ADD_<name>`: Accumulating multiply (OUT += Matrix × IN)
 
 ```c
-#define MATMUL_Dr(IN, OUT, K_VAL, NP) \
-    for (int elem = 0; elem < KpartMax; ++elem; @inner) { \
-        if (elem < K_VAL) { \
-            for (int i = 0; i < (NP); ++i) { \
+// For Dr[20×20]: IN stride = 20, OUT stride = 20
+#define MATMUL_Dr(IN, OUT, K_VAL) \
+    for (int i = 0; i < 20; ++i) { \
+        for (int elem = 0; elem < KpartMax; ++elem; @inner) { \
+            if (elem < K_VAL) { \
                 real_t sum = REAL_ZERO; \
-                for (int j = 0; j < (NP); ++j) { \
-                    sum += Dr[i][j] * (IN)[elem * (NP) + j]; \
+                for (int j = 0; j < 20; ++j) { \
+                    sum += Dr[i][j] * (IN)[elem * 20 + j]; \
                 } \
-                (OUT)[elem * (NP) + i] = sum; \
+                (OUT)[elem * 20 + i] = sum; \
+            } \
+        } \
+    }
+
+// For LIFT[20×48]: IN stride = 48, OUT stride = 20  
+#define MATMUL_LIFT(IN, OUT, K_VAL) \
+    for (int i = 0; i < 20; ++i) { \
+        for (int elem = 0; elem < KpartMax; ++elem; @inner) { \
+            if (elem < K_VAL) { \
+                real_t sum = REAL_ZERO; \
+                for (int j = 0; j < 48; ++j) { \
+                    sum += LIFT[i][j] * (IN)[elem * 48 + j]; \
+                } \
+                (OUT)[elem * 20 + i] = sum; \
+            } \
+        } \
+    }
+
+// Accumulating variant for LIFT (commonly used for boundary contributions)
+#define MATMUL_ADD_LIFT(IN, OUT, K_VAL) \
+    for (int i = 0; i < 20; ++i) { \
+        for (int elem = 0; elem < KpartMax; ++elem; @inner) { \
+            if (elem < K_VAL) { \
+                real_t sum = REAL_ZERO; \
+                for (int j = 0; j < 48; ++j) { \
+                    sum += LIFT[i][j] * (IN)[elem * 48 + j]; \
+                } \
+                (OUT)[elem * 20 + i] += sum; \
             } \
         } \
     }
@@ -196,24 +228,28 @@ Key features:
   iteration count
 - Empty iterations where elem >= K_VAL are wasted but necessary for OCCA
   compliance
+- Strides are automatically determined from the matrix dimensions
+- Both standard (MATMUL) and accumulating (MATMUL_ADD) variants support
+  common DG operations
 
 ## Usage Example
 
 ```go
 // Create kernel program
 kp := NewKernelProgram(device, Config{
-K: []int{100, 150, 80}, // Variable partition sizes
-FloatType: Float64,
+    K: []int{100, 150, 80}, // Variable partition sizes
+    FloatType: Float64,
 })
 // KernelProgram automatically computes KpartMax = 150 from K array
 
-// Add matrices
-kp.AddStaticMatrix("Dr", differentiationMatrix)
+// Add matrices - dimensions determine stride behavior
+kp.AddStaticMatrix("Dr", differentiationMatrix)    // 20×20: stride 20
+kp.AddStaticMatrix("LIFT", liftMatrix)            // 20×48: IN stride 48, OUT stride 20
 
 // Allocate arrays
 kp.AllocateArrays([]ArraySpec{
-{Name: "U", Size: totalSize, Alignment: CacheLineAlign},
-{Name: "RHS", Size: totalSize, Alignment: CacheLineAlign},
+    {Name: "U", Size: totalSize, Alignment: CacheLineAlign},
+    {Name: "RHS", Size: totalSize, Alignment: CacheLineAlign},
 })
 
 // Kernel properly uses @outer/@inner pattern
@@ -222,9 +258,13 @@ kernelSource := `
     for (int part = 0; part < NPART; ++part; @outer) {
         const real_t* U = U_PART(part);
         real_t* RHS = RHS_PART(part);
+        const real_t* flux = flux_PART(part);
         
-        // Matrix multiply macro contains the @inner loop
-        MATMUL_Dr(U, RHS, K[part], NP);
+        // Standard matrix multiply
+        MATMUL_Dr(U, RHS, K[part]);
+        
+        // Accumulating multiply for boundary contributions
+        MATMUL_ADD_LIFT(flux, RHS, K[part]);
     }
 }
 `
@@ -244,3 +284,5 @@ kernelSource := `
    utilization through vectorization and thread parallelism
 6. **Clean Code**: Macros encapsulate the @inner pattern, keeping kernel code
    readable
+7. **Automatic Stride Management**: Matrix dimensions determine memory access
+   patterns, eliminating manual stride parameters
