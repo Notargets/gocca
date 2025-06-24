@@ -258,14 +258,14 @@ func buildMatmulKernel(np int) string {
 		// The cyclic U→V→W→U pattern ensures data dependencies
 		for (int iter = 0; iter < NITER; ++iter) {
 			// V = Dr * U (first operation)
-			MATMUL_Dr(U, V, K[part], NP);
+			MATMUL_Dr(U, V, K[part]);
 			
 			// W = Dr * V (second operation on result)
-			MATMUL_Dr(V, W, K[part], NP);
+			MATMUL_Dr(V, W, K[part]);
 			
 			// U = Dr * W (third operation, result feeds back)
 			// Cast away const for the cyclic computation
-			MATMUL_Dr(W, (real_t*)U, K[part], NP);
+			MATMUL_Dr(W, (real_t*)U, K[part]);
 		}
 	}
 }
