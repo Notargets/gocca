@@ -105,7 +105,7 @@ func TestDeviceMemoryMethods(t *testing.T) {
 		t.Error("Serial device should not have separate memory space")
 	}
 
-	allocatedBytes := uint64(0)
+	allocatedBytes := int64(0)
 	memBytes := int64(10 * 4) // 10 ints
 
 	if device.MemoryAllocated() != allocatedBytes {
@@ -114,7 +114,7 @@ func TestDeviceMemoryMethods(t *testing.T) {
 
 	// Test malloc
 	mem1 := device.Malloc(memBytes, nil, nil)
-	allocatedBytes += uint64(memBytes)
+	allocatedBytes += memBytes
 
 	if device.MemoryAllocated() != allocatedBytes {
 		t.Errorf("Expected %d allocated bytes, got %d", allocatedBytes, device.MemoryAllocated())
@@ -124,7 +124,7 @@ func TestDeviceMemoryMethods(t *testing.T) {
 	defer props.Free()
 
 	mem2 := device.Malloc(memBytes, nil, props)
-	allocatedBytes += uint64(memBytes)
+	allocatedBytes += memBytes
 
 	if device.MemoryAllocated() != allocatedBytes {
 		t.Errorf("Expected %d allocated bytes, got %d", allocatedBytes, device.MemoryAllocated())
@@ -132,14 +132,14 @@ func TestDeviceMemoryMethods(t *testing.T) {
 
 	// Free memory
 	mem1.Free()
-	allocatedBytes -= uint64(memBytes)
+	allocatedBytes -= memBytes
 
 	if device.MemoryAllocated() != allocatedBytes {
 		t.Errorf("Expected %d allocated bytes, got %d", allocatedBytes, device.MemoryAllocated())
 	}
 
 	mem2.Free()
-	allocatedBytes -= uint64(memBytes)
+	allocatedBytes -= memBytes
 
 	if device.MemoryAllocated() != allocatedBytes {
 		t.Errorf("Expected %d allocated bytes, got %d", allocatedBytes, device.MemoryAllocated())

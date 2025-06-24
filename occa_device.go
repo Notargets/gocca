@@ -72,16 +72,20 @@ var deviceMutex sync.Mutex
 
 // CreateDevice creates a new OCCA device from JSON properties (direct C API equivalent)
 func CreateDevice(props *OCCAJson) (*OCCADevice, error) {
-	// Check if this is a CUDA device by examining the mode property
-	isCUDA := false
+	// Check if this is a CUDA, HIP, OpenCL, or Metal device by examining the mode property
+	needsThreadLock := false
 	if props != nil && props.ObjectHas("mode") {
 		modeValue := props.ObjectGet("mode", nil)
 		if modeStr, ok := modeValue.(string); ok {
-			isCUDA = strings.Contains(modeStr, "CUDA") || strings.Contains(modeStr, "cuda")
+			modeLower := strings.ToLower(modeStr)
+			needsThreadLock = strings.Contains(modeLower, "cuda") ||
+				strings.Contains(modeLower, "hip") ||
+				strings.Contains(modeLower, "opencl") ||
+				strings.Contains(modeLower, "metal")
 		}
 	}
 
-	if isCUDA {
+	if needsThreadLock {
 		runtime.LockOSThread()
 	}
 
@@ -95,7 +99,7 @@ func CreateDevice(props *OCCAJson) (*OCCADevice, error) {
 	device := C.occaCreateDevice(propsArg)
 	if !C.occaDeviceIsInitialized(device) {
 		// Unlock thread if device creation failed
-		if isCUDA {
+		if needsThreadLock {
 			runtime.UnlockOSThread()
 		}
 		return nil, errors.New("failed to initialize device")
@@ -103,15 +107,20 @@ func CreateDevice(props *OCCAJson) (*OCCADevice, error) {
 
 	return &OCCADevice{
 		device:       device,
-		threadLocked: isCUDA,
+		threadLocked: needsThreadLock,
 	}, nil
 }
 
 // NewDevice creates a new OCCA device with the given properties (string convenience method)
 func NewDevice(deviceInfo string) (*OCCADevice, error) {
-	// Check if this is a CUDA device and lock thread if needed
-	isCUDA := strings.Contains(deviceInfo, "CUDA") || strings.Contains(deviceInfo, "cuda")
-	if isCUDA {
+	// Check if this is a CUDA, HIP, OpenCL, or Metal device and lock thread if needed
+	deviceInfoLower := strings.ToLower(deviceInfo)
+	needsThreadLock := strings.Contains(deviceInfoLower, "cuda") ||
+		strings.Contains(deviceInfoLower, "hip") ||
+		strings.Contains(deviceInfoLower, "opencl") ||
+		strings.Contains(deviceInfoLower, "metal")
+
+	if needsThreadLock {
 		runtime.LockOSThread()
 	}
 
@@ -121,7 +130,7 @@ func NewDevice(deviceInfo string) (*OCCADevice, error) {
 	device := C.createDeviceHelper(cDeviceInfo)
 	if !C.occaDeviceIsInitialized(device) {
 		// Unlock thread if device creation failed
-		if isCUDA {
+		if needsThreadLock {
 			runtime.UnlockOSThread()
 		}
 		return nil, errors.New("failed to initialize device")
@@ -129,15 +138,20 @@ func NewDevice(deviceInfo string) (*OCCADevice, error) {
 
 	return &OCCADevice{
 		device:       device,
-		threadLocked: isCUDA,
+		threadLocked: needsThreadLock,
 	}, nil
 }
 
 // CreateDeviceFromString creates a device from a string configuration
 func CreateDeviceFromString(info string) (*OCCADevice, error) {
-	// Check if this is a CUDA device and lock thread if needed
-	isCUDA := strings.Contains(info, "CUDA") || strings.Contains(info, "cuda")
-	if isCUDA {
+	// Check if this is a CUDA, HIP, OpenCL, or Metal device and lock thread if needed
+	infoLower := strings.ToLower(info)
+	needsThreadLock := strings.Contains(infoLower, "cuda") ||
+		strings.Contains(infoLower, "hip") ||
+		strings.Contains(infoLower, "opencl") ||
+		strings.Contains(infoLower, "metal")
+
+	if needsThreadLock {
 		runtime.LockOSThread()
 	}
 
@@ -147,7 +161,7 @@ func CreateDeviceFromString(info string) (*OCCADevice, error) {
 	device := C.occaCreateDeviceFromString(cInfo)
 	if !C.occaDeviceIsInitialized(device) {
 		// Unlock thread if device creation failed
-		if isCUDA {
+		if needsThreadLock {
 			runtime.UnlockOSThread()
 		}
 		return nil, errors.New("failed to initialize device from string")
@@ -155,7 +169,7 @@ func CreateDeviceFromString(info string) (*OCCADevice, error) {
 
 	return &OCCADevice{
 		device:       device,
-		threadLocked: isCUDA,
+		threadLocked: needsThreadLock,
 	}, nil
 }
 
@@ -168,64 +182,48 @@ func (d *OCCADevice) IsInitialized() bool {
 
 // Mode returns the device mode (e.g., "Serial", "OpenMP", "CUDA", etc.)
 func (d *OCCADevice) Mode() string {
-	return C.GoString(C.occaDeviceMode(d.device))
+	cMode := C.occaDeviceMode(d.device)
+	return C.GoString(cMode)
 }
 
-// GetProperties returns device properties as JSON
+// GetProperties returns device properties
 func (d *OCCADevice) GetProperties() *OCCAJson {
 	return &OCCAJson{json: C.occaDeviceGetProperties(d.device)}
 }
 
-// Arch returns the device architecture
-func (d *OCCADevice) Arch() string {
-	return C.GoString(C.occaDeviceArch(d.device))
-}
-
-// GetKernelProperties returns kernel properties for the device
+// GetKernelProperties returns kernel properties
 func (d *OCCADevice) GetKernelProperties() *OCCAJson {
 	return &OCCAJson{json: C.occaDeviceGetKernelProperties(d.device)}
 }
 
-// GetMemoryProperties returns memory properties for the device
+// GetMemoryProperties returns memory properties
 func (d *OCCADevice) GetMemoryProperties() *OCCAJson {
 	return &OCCAJson{json: C.occaDeviceGetMemoryProperties(d.device)}
 }
 
-// GetStreamProperties returns stream properties for the device
-func (d *OCCADevice) GetStreamProperties() *OCCAJson {
-	return &OCCAJson{json: C.occaDeviceGetStreamProperties(d.device)}
+// MemorySize returns the device memory size
+func (d *OCCADevice) MemorySize() int64 {
+	return int64(C.occaDeviceMemorySize(d.device))
 }
 
-// MemorySize returns the total memory size of the device
-func (d *OCCADevice) MemorySize() uint64 {
-	return uint64(C.occaDeviceMemorySize(d.device))
+// MemoryAllocated returns the amount of memory allocated
+func (d *OCCADevice) MemoryAllocated() int64 {
+	return int64(C.occaDeviceMemoryAllocated(d.device))
 }
 
-// MemoryAllocated returns the amount of memory currently allocated
-func (d *OCCADevice) MemoryAllocated() uint64 {
-	return uint64(C.occaDeviceMemoryAllocated(d.device))
-}
-
-// Synchronization methods
-
-// Finish waits for all operations on the current stream to complete
+// Finish waits for all operations to complete
 func (d *OCCADevice) Finish() {
 	C.occaDeviceFinish(d.device)
 }
 
-// FinishAll waits for all operations on all streams to complete
-func (d *OCCADevice) FinishAll() {
-	C.occaDeviceFinishAll(d.device)
-}
-
-// HasSeparateMemorySpace checks if device has separate memory space from host
+// HasSeparateMemorySpace checks if device has separate memory space
 func (d *OCCADevice) HasSeparateMemorySpace() bool {
 	return bool(C.occaDeviceHasSeparateMemorySpace(d.device))
 }
 
 // Stream methods
 
-// CreateStream creates a new stream with optional properties
+// CreateStream creates a new stream
 func (d *OCCADevice) CreateStream(props *OCCAJson) *OCCAStream {
 	var propsArg C.occaJson
 	if props != nil {
@@ -441,7 +439,7 @@ func (d *OCCADevice) CreateMemoryPool(props *OCCAJson) *OCCAMemoryPool {
 
 // Free methods
 
-// Free frees the device and unlocks the thread if it's a CUDA device
+// Free frees the device and unlocks the thread if it's locked
 func (d *OCCADevice) Free() {
 	deviceMutex.Lock()
 	defer deviceMutex.Unlock()
