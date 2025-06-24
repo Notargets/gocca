@@ -261,3 +261,130 @@ func testRun(t *testing.T) {
 		}
 	}
 }
+
+// TestBuildKernelFromBinary tests building kernel from binary file
+func TestBuildKernelFromBinary(t *testing.T) {
+	// First, we need to build a kernel to get a binary
+	kernelSource := `
+@kernel void testKernel(const int N, float *a) {
+  for (int i = 0; i < N; ++i; @tile(16, @outer, @inner)) {
+    a[i] = i * 2.0f;
+  }
+}
+`
+
+	// Build kernel from source first
+	kernel, err := gocca.BuildKernelFromString(kernelSource, "testKernel", nil)
+	if err != nil {
+		t.Fatalf("Failed to build kernel from string: %v", err)
+	}
+
+	// Get the binary filename
+	binaryFile := kernel.BinaryFilename()
+	kernel.Free()
+
+	if binaryFile == "" {
+		t.Skip("No binary file generated for this mode")
+	}
+
+	// Now test building from binary
+	kernel2, err := gocca.BuildKernelFromBinary(binaryFile, "testKernel", nil)
+	if err != nil {
+		t.Errorf("BuildKernelFromBinary failed: %v", err)
+	}
+	if kernel2 != nil {
+		defer kernel2.Free()
+
+		// Verify the kernel is initialized
+		if !kernel2.IsInitialized() {
+			t.Error("Kernel built from binary should be initialized")
+		}
+
+		// Verify kernel name
+		if kernel2.Name() != "testKernel" {
+			t.Errorf("Expected kernel name 'testKernel', got '%s'", kernel2.Name())
+		}
+	}
+}
+
+// TestKernelDimensions tests MaxDims, MaxOuterDims, MaxInnerDims
+func TestKernelDimensions(t *testing.T) {
+	kernelSource := `
+@kernel void testKernel(const int N, float *a) {
+  for (int i = 0; i < N; ++i; @tile(16, @outer, @inner)) {
+    a[i] = i;
+  }
+}
+`
+
+	kernel, err := gocca.BuildKernelFromString(kernelSource, "testKernel", nil)
+	if err != nil {
+		t.Fatalf("Failed to build kernel: %v", err)
+	}
+	defer kernel.Free()
+
+	// Test MaxDims
+	maxDims := kernel.MaxDims()
+	if maxDims < 0 {
+		t.Errorf("MaxDims should return non-negative value, got %d", maxDims)
+	}
+
+	// Test MaxOuterDims
+	maxOuter := kernel.MaxOuterDims()
+	if maxOuter.X == 0 && maxOuter.Y == 0 && maxOuter.Z == 0 {
+		t.Error("MaxOuterDims returned all zeros")
+	}
+
+	// Test MaxInnerDims
+	maxInner := kernel.MaxInnerDims()
+	if maxInner.X == 0 && maxInner.Y == 0 && maxInner.Z == 0 {
+		t.Error("MaxInnerDims returned all zeros")
+	}
+}
+
+// TestKernelRunEdgeCases tests kernel.Run with edge cases
+func TestKernelRunEdgeCases(t *testing.T) {
+	kernelSource := `
+@kernel void testKernel(const int N, float *a) {
+  for (int i = 0; i < N; ++i; @tile(16, @outer, @inner)) {
+    if (a) a[i] = i;
+  }
+}
+`
+
+	kernel, err := gocca.BuildKernelFromString(kernelSource, "testKernel", nil)
+	if err != nil {
+		t.Fatalf("Failed to build kernel: %v", err)
+	}
+	defer kernel.Free()
+
+	t.Run("ZeroWorkItems", func(t *testing.T) {
+		// Allocate memory but run with N=0
+		mem := gocca.Malloc(100, nil, nil)
+		if mem == nil {
+			t.Fatal("Failed to allocate memory")
+		}
+		defer mem.Free()
+
+		// Run with zero work items - should not crash
+		kernel.Run(0, mem)
+	})
+
+	t.Run("NullMemoryArg", func(t *testing.T) {
+		// Run with N=0 and null memory - should not crash
+		kernel.Run(0, nil)
+	})
+
+	t.Run("NormalExecution", func(t *testing.T) {
+		// Test normal execution with valid parameters
+		N := 10
+		mem := gocca.Malloc(int64(N*4), nil, nil) // 10 floats
+		if mem == nil {
+			t.Fatal("Failed to allocate memory")
+		}
+		defer mem.Free()
+
+		// This should execute without issues
+		kernel.Run(N, mem)
+	})
+}
