@@ -19,10 +19,8 @@ gocca_test/
 **Current**: Device, memory, kernel, stream basics
 **Add**:
 - TestDeviceMemoryAllocated: device.MemoryAllocated()
-- TestDeviceMemoryUsed: device.MemoryUsed()
 - TestDeviceFinish: device.Finish()
 - TestMemoryCopyWithOffsets: CopyToWithOffset, CopyFromWithOffset
-- TestStreamWaitFor: stream.WaitFor()
 - Merge occa_version_test.go functions here
 
 ### kernel_test.go (ENHANCE EXISTING)
@@ -31,7 +29,6 @@ gocca_test/
 - TestBuildKernelFromBinary: Actually test binary loading
 - TestKernelDimensions: Verify MaxDims, MaxOuterDims, MaxInnerDims return values
 - TestKernelRunEdgeCases: Zero work items, nullptr args
-- TestKernelMetadata: Test metadata get/set if exposed
 
 ### memorypool_test.go (ENHANCE EXISTING)
 **Current**: Basic reserve operations
@@ -42,7 +39,7 @@ gocca_test/
 
 ### api_completeness_test.go (CREATE NEW)
 ```go
-package gocca_test_test
+package gocca_test
 
 // Test every exported gocca function has basic functionality
 // Group by API area, test exists + basic operation
@@ -74,27 +71,27 @@ func TestDtypeAPIComplete(t *testing.T) {
 
 ### error_handling_test.go (CREATE NEW)
 ```go
-package gocca_test_test
+package gocca_test
 
 // Test Go-specific error conditions and safety
 
 func TestNilHandling(t *testing.T) {
-    // Test nil device, nil memory, nil kernel behavior
-    // Verify no panics, proper error returns
+   // Test nil device, nil memory, nil kernel behavior
+   // Verify no panics, proper error returns
 }
 
 func TestUseAfterFree(t *testing.T) {
-    // Create objects, free them, verify operations fail gracefully
+   // Create objects, free them, verify operations fail gracefully
 }
 
 func TestInvalidArguments(t *testing.T) {
-    // Wrong types, out of bounds, negative sizes
-    // Verify errors returned, no crashes
+   // Wrong types, out of bounds, negative sizes
+   // Verify errors returned, no crashes
 }
 
 func TestConcurrency(t *testing.T) {
-    // Multiple goroutines using gocca (if supported)
-    // Verify thread safety of operations
+   // Multiple goroutines using gocca (if supported)
+   // Verify thread safety of operations
 }
 ```
 
@@ -103,26 +100,26 @@ func TestConcurrency(t *testing.T) {
 1. **START**: Run coverage baseline: `go test -cover -coverpkg=github.com/notargets/gocca ./gocca_test`
 
 2. **PHASE 1**: Create new files
-    - Create api_completeness_test.go with all function groups
-    - Create error_handling_test.go with error scenarios
-    - Each test: verify function exists + one valid call
+   - Create api_completeness_test.go with all function groups
+   - Create error_handling_test.go with error scenarios
+   - Each test: verify function exists + one valid call
 
 3. **PHASE 2**: Enhance existing files
-    - Add missing methods to base_test.go
-    - Fix kernel_test.go binary/dimension tests
-    - Add edge cases to memorypool_test.go
-    - Delete occa_version_test.go after merging
+   - Add missing methods to base_test.go
+   - Fix kernel_test.go binary/dimension tests
+   - Add edge cases to memorypool_test.go
+   - Delete occa_version_test.go after merging
 
 4. **PHASE 3**: Fill coverage gaps
-    - Run coverage after each file
-    - Target 85%+ total coverage
-    - Skip deprecated/internal functions
+   - Run coverage after each file
+   - Target 85%+ total coverage
+   - Skip deprecated/internal functions
 
 5. **VERIFY**: Each test must:
-    - Test actual functionality (not just "exists")
-    - Handle cleanup (defer Free() calls)
-    - Use consistent error checking pattern
-    - Follow existing test style
+   - Test actual functionality (not just "exists")
+   - Handle cleanup (defer Free() calls)
+   - Use consistent error checking pattern
+   - Follow existing test style
 
 ## Expected Coverage
 - Current: 61%
