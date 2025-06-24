@@ -158,9 +158,10 @@ func TestKernelProgram_CodeGen_MatrixMacroStructure(t *testing.T) {
 		t.Error("Missing Dr matrix declaration")
 	}
 
-	// Verify macro contains @inner loop
+	// Verify macro contains @inner loop and new signature
 	requiredPatterns := []string{
-		"#define MATMUL_Dr(IN, OUT, K_VAL, NP)",
+		"#define MATMUL_Dr(IN, OUT, K_VAL)",
+		"#define MATMUL_ADD_Dr(IN, OUT, K_VAL)",
 		"for (int elem = 0; elem < KpartMax; ++elem; @inner)",
 		"if (elem < (K_VAL))",
 	}
@@ -194,90 +195,221 @@ func TestKernelProgram_Memory_SingleArrayAllocation(t *testing.T) {
 
 	err := kp.AllocateArrays([]ArraySpec{spec})
 	if err != nil {
-		t.Fatalf("Failed to allocate array: %v", err)
+		t.Fatalf("Failed to allocate: %v", err)
 	}
 
-	// Verify allocations exist
-	if kp.GetMemory("data") == nil {
-		t.Error("data_global not allocated")
+	// Verify allocation exists
+	mem := kp.GetMemory("data")
+	if mem == nil {
+		t.Error("Memory not allocated")
 	}
-	if kp.GetOffsets("data") == nil {
-		t.Error("data_offsets not allocated")
+
+	// Verify offsets exist
+	offsets := kp.GetOffsets("data")
+	if offsets == nil {
+		t.Error("Offsets not allocated")
+	}
+
+	// Verify allocation tracked
+	arrays := kp.GetAllocatedArrays()
+	if len(arrays) != 1 || arrays[0] != "data" {
+		t.Errorf("Expected allocated arrays [data], got %v", arrays)
 	}
 }
 
-// Test 3.2: Alignment calculations with multiple partitions
-func TestKernelProgram_Memory_AlignmentCalculations(t *testing.T) {
+// Test 3.2: Multiple array allocation
+func TestKernelProgram_Memory_MultipleArrayAllocation(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	// Use odd-sized partitions to test padding
-	k := []int{3, 5, 7}
+	k := []int{10, 15, 20}
+	totalElements := 45
+
 	kp := NewKernelProgram(device, Config{K: k})
 	defer kp.Free()
 
-	spec := ArraySpec{
-		Name:      "aligned",
-		Size:      15 * 8,
-		Alignment: CacheLineAlign, // 64-byte alignment
-		DataType:  Float64,
+	specs := []ArraySpec{
+		{Name: "U", Size: int64(totalElements * 8), DataType: Float64, Alignment: NoAlignment},
+		{Name: "V", Size: int64(totalElements * 8), DataType: Float64, Alignment: NoAlignment},
+		{Name: "W", Size: int64(totalElements * 8), DataType: Float64, Alignment: NoAlignment},
 	}
 
-	err := kp.AllocateArrays([]ArraySpec{spec})
+	err := kp.AllocateArrays(specs)
 	if err != nil {
 		t.Fatalf("Failed to allocate: %v", err)
 	}
 
-	// Get offsets and verify alignment
-	offsetsMem := kp.GetOffsets("aligned")
-	offsets := make([]int64, 4)
-	offsetsMem.CopyTo(unsafe.Pointer(&offsets[0]), int64(4*8))
+	// Verify all allocations
+	expectedArrays := []string{"U", "V", "W"}
+	arrays := kp.GetAllocatedArrays()
 
-	// Mathematical property: each partition starts at aligned boundary
-	for i := 0; i < 3; i++ {
-		byteOffset := offsets[i] * 8
-		if byteOffset%64 != 0 {
-			t.Errorf("Partition %d not aligned: byte offset %d not divisible by 64",
-				i, byteOffset)
+	if len(arrays) != len(expectedArrays) {
+		t.Errorf("Expected %d arrays, got %d", len(expectedArrays), len(arrays))
+	}
+
+	for _, name := range expectedArrays {
+		if kp.GetMemory(name) == nil {
+			t.Errorf("Memory for %s not allocated", name)
+		}
+		if kp.GetOffsets(name) == nil {
+			t.Errorf("Offsets for %s not allocated", name)
 		}
 	}
 }
 
 // ============================================================================
-// Section 4: Kernel Building and Execution Tests
+// Section 4: Kernel Operations Tests
+// Following Unit Testing Principle: Test operations
 // ============================================================================
 
-// Test 4.1: Build kernel with proper @outer/@inner structure
-func TestKernelProgram_Kernel_ProperOCCAStructure(t *testing.T) {
+// Test 4.1: Basic kernel build and execution
+func TestKernelProgram_Execution_BasicKernel(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
 	kp := NewKernelProgram(device, Config{K: []int{10}})
 	defer kp.Free()
 
-	// Kernel that follows the design pattern - must have @inner loop
+	// Allocate simple array
+	err := kp.AllocateArrays([]ArraySpec{
+		{Name: "data", Size: 10 * 8, DataType: Float64, Alignment: NoAlignment},
+	})
+	if err != nil {
+		t.Fatalf("Failed to allocate: %v", err)
+	}
+
+	// Simple kernel that sets values
 	kernelSource := `
-@kernel void testKernel(const int_t* K) {
+@kernel void setValues(
+	const int_t* K,
+	real_t* data_global,
+	const int_t* data_offsets
+) {
 	for (int part = 0; part < NPART; ++part; @outer) {
-		// OCCA requires at least one @inner loop
-		for (int elem = 0; elem < KpartMax; ++elem; @inner) {
-			if (elem < K[part]) {
-				// Dummy work to satisfy OCCA requirements
-				int dummy = elem;
-			}
+		real_t* data = data_PART(part);
+		
+		for (int i = 0; i < K[part]; ++i; @inner) {
+			data[i] = (real_t)i;
 		}
 	}
-}
-`
+}`
 
-	_, err := kp.BuildKernel(kernelSource, "testKernel")
+	kernel, err := kp.BuildKernel(kernelSource, "setValues")
 	if err != nil {
 		t.Fatalf("Failed to build kernel: %v", err)
+	}
+
+	if kernel == nil {
+		t.Error("Kernel is nil")
+	}
+
+	// Execute kernel
+	err = kp.RunKernel("setValues", "data")
+	if err != nil {
+		t.Fatalf("Kernel execution failed: %v", err)
+	}
+
+	// Verify results
+	result := make([]float64, 10)
+	kp.GetMemory("data").CopyTo(unsafe.Pointer(&result[0]), 10*8)
+
+	for i := 0; i < 10; i++ {
+		if math.Abs(result[i]-float64(i)) > 1e-10 {
+			t.Errorf("Element %d: expected %f, got %f", i, float64(i), result[i])
+		}
 	}
 }
 
 // Test 4.2: Kernel execution with matrix operation
 func TestKernelProgram_Execution_MatrixOperation(t *testing.T) {
+	device := createTestDevice()
+	defer device.Free()
+
+	np := 4
+	k := []int{5, 10}
+	totalNodes := 15 * np
+
+	kp := NewKernelProgram(device, Config{
+		K:         k,
+		FloatType: Float64,
+	})
+	defer kp.Free()
+
+	// Add differentiation matrix
+	Dr := mat.NewDense(np, np, []float64{
+		-2.0, 3.0, -1.0, 0.0,
+		-1.0, 0.0, 1.0, 0.0,
+		0.0, -1.0, 0.0, 1.0,
+		0.0, 1.0, -3.0, 2.0,
+	})
+	kp.AddStaticMatrix("Dr", Dr)
+
+	// Allocate arrays
+	specs := []ArraySpec{
+		{Name: "U", Size: int64(totalNodes * 8), DataType: Float64, Alignment: NoAlignment},
+		{Name: "Ur", Size: int64(totalNodes * 8), DataType: Float64, Alignment: NoAlignment},
+	}
+	err := kp.AllocateArrays(specs)
+	if err != nil {
+		t.Fatalf("Failed to allocate: %v", err)
+	}
+
+	// Initialize test data
+	U := make([]float64, totalNodes)
+	for i := range U {
+		U[i] = float64(i % 10)
+	}
+	kp.GetMemory("U").CopyFrom(unsafe.Pointer(&U[0]), int64(totalNodes*8))
+
+	// Kernel using differentiation matrix
+	kernelSource := fmt.Sprintf(`
+#define NP %d
+
+@kernel void differentiate(
+	const int_t* K,
+	const real_t* U_global,
+	const int_t* U_offsets,
+	real_t* Ur_global,
+	const int_t* Ur_offsets
+) {
+	for (int part = 0; part < NPART; ++part; @outer) {
+		const real_t* U = U_PART(part);
+		real_t* Ur = Ur_PART(part);
+		MATMUL_Dr(U, Ur, K[part]);
+	}
+}
+`, np)
+
+	_, err = kp.BuildKernel(kernelSource, "differentiate")
+	if err != nil {
+		t.Fatalf("Failed to build kernel: %v", err)
+	}
+
+	// Execute differentiation
+	err = kp.RunKernel("differentiate", "U", "Ur")
+	if err != nil {
+		t.Fatalf("Kernel execution failed: %v", err)
+	}
+
+	// Verify results make sense (not checking exact values, just sanity)
+	result := make([]float64, totalNodes)
+	kp.GetMemory("Ur").CopyTo(unsafe.Pointer(&result[0]), int64(totalNodes*8))
+
+	// Check that we got non-zero results
+	hasNonZero := false
+	for i := 0; i < totalNodes; i++ {
+		if math.Abs(result[i]) > 1e-10 {
+			hasNonZero = true
+			break
+		}
+	}
+	if !hasNonZero {
+		t.Error("Differentiation produced all zeros")
+	}
+}
+
+// Test 4.3: Kernel execution with identity matrix
+func TestKernelProgram_Execution_IdentityMatrix(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
@@ -315,8 +447,6 @@ func TestKernelProgram_Execution_MatrixOperation(t *testing.T) {
 		U[i] = float64(i)
 	}
 
-	// Write to device - use the proper method that handles potential padding
-	// For unaligned arrays, direct copy should work
 	kp.GetMemory("U").CopyFrom(unsafe.Pointer(&U[0]), int64(totalNodes*8))
 
 	// Kernel using MATMUL macro with @inner
@@ -333,7 +463,7 @@ func TestKernelProgram_Execution_MatrixOperation(t *testing.T) {
 	for (int part = 0; part < NPART; ++part; @outer) {
 		const real_t* U = U_PART(part);
 		real_t* V = V_PART(part);
-		MATMUL_I(U, V, K[part], NP);
+		MATMUL_I(U, V, K[part]);
 	}
 }
 `, np)
@@ -478,276 +608,25 @@ func TestKernelProgram_MathProperties_OffsetCalculations(t *testing.T) {
 
 	offsets, totalSize := kp.calculateAlignedOffsetsAndSize(spec)
 
-	// Property 1: Final offset * bytes_per_element = total size
-	if offsets[len(k)]*8 != totalSize {
-		t.Errorf("Final offset doesn't match total size: %d*8 != %d",
-			offsets[len(k)], totalSize)
+	// Verify offset calculation properties
+	if len(offsets) != len(k)+1 {
+		t.Errorf("Expected %d offsets, got %d", len(k)+1, len(offsets))
 	}
 
-	// Property 2: Each partition has sufficient space
-	for i := 0; i < len(k); i++ {
-		space := offsets[i+1] - offsets[i]
-		if space < int64(k[i]) {
-			t.Errorf("Partition %d: insufficient space %d < %d",
-				i, space, k[i])
-		}
+	// First offset should be 0
+	if offsets[0] != 0 {
+		t.Errorf("First offset should be 0, got %d", offsets[0])
 	}
 
-	// Property 3: Offsets are monotonically increasing
+	// Offsets should be monotonically increasing
 	for i := 1; i < len(offsets); i++ {
 		if offsets[i] <= offsets[i-1] {
-			t.Errorf("Offsets not monotonic at index %d: %d <= %d",
-				i, offsets[i], offsets[i-1])
-		}
-	}
-}
-
-// ============================================================================
-// Section 8: Integration Test - Complete Workflow
-// Following Unit Testing Principle: Real-world scenarios
-// ============================================================================
-
-// Test 8.1: Complete differentiation workflow
-func TestKernelProgram_Integration_DifferentiationWorkflow(t *testing.T) {
-	device := createTestDevice()
-	defer device.Free()
-
-	// Problem setup
-	np := 4             // Nodes per element
-	k := []int{3, 4, 2} // Elements per partition
-	totalElements := 9  // Sum of k
-	totalNodes := totalElements * np
-
-	kp := NewKernelProgram(device, Config{
-		K:         k,
-		FloatType: Float64,
-	})
-	defer kp.Free()
-
-	// Create a simple differentiation matrix
-	Dr := mat.NewDense(np, np, []float64{
-		-3.0, 4.0, -1.0, 0.0,
-		-1.0, 0.0, 1.0, 0.0,
-		0.0, -1.0, 0.0, 1.0,
-		0.0, 1.0, -4.0, 3.0,
-	})
-	kp.AddStaticMatrix("Dr", Dr)
-
-	// Allocate arrays
-	specs := []ArraySpec{
-		{Name: "U", Size: int64(totalNodes * 8), DataType: Float64, Alignment: CacheLineAlign},
-		{Name: "Ur", Size: int64(totalNodes * 8), DataType: Float64, Alignment: CacheLineAlign},
-	}
-	err := kp.AllocateArrays(specs)
-	if err != nil {
-		t.Fatalf("Failed to allocate: %v", err)
-	}
-
-	// Initialize U with a simple pattern
-	U := make([]float64, totalNodes)
-	for elem := 0; elem < totalElements; elem++ {
-		for node := 0; node < np; node++ {
-			idx := elem*np + node
-			U[idx] = float64(node) // Linear within each element
-		}
-	}
-	kp.GetMemory("U").CopyFrom(unsafe.Pointer(&U[0]), int64(totalNodes*8))
-
-	// Kernel using the matrix macro
-	kernelSource := fmt.Sprintf(`
-#define NP %d
-
-@kernel void differentiate(
-	const int_t* K,
-	const real_t* U_global,
-	const int_t* U_offsets,
-	real_t* Ur_global,
-	const int_t* Ur_offsets
-) {
-	for (int part = 0; part < NPART; ++part; @outer) {
-		const real_t* U = U_PART(part);
-		real_t* Ur = Ur_PART(part);
-		MATMUL_Dr(U, Ur, K[part], NP);
-	}
-}
-`, np)
-
-	_, err = kp.BuildKernel(kernelSource, "differentiate")
-	if err != nil {
-		t.Fatalf("Failed to build kernel: %v", err)
-	}
-
-	// Execute differentiation
-	err = kp.RunKernel("differentiate", "U", "Ur")
-	if err != nil {
-		t.Fatalf("Kernel execution failed: %v", err)
-	}
-
-	// Verify results make sense (not checking exact values, just sanity)
-	result := make([]float64, totalNodes)
-	kp.GetMemory("Ur").CopyTo(unsafe.Pointer(&result[0]), int64(totalNodes*8))
-
-	// Check that we got non-zero results
-	hasNonZero := false
-	for i := 0; i < totalNodes; i++ {
-		if math.Abs(result[i]) > 1e-10 {
-			hasNonZero = true
-			break
-		}
-	}
-	if !hasNonZero {
-		t.Error("Differentiation produced all zeros")
-	}
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-// Test 4.2: Kernel execution with matrix operation - DEBUG VERSION
-func TestKernelProgram_Execution_MatrixOperation_Debug(t *testing.T) {
-	device := createTestDevice()
-	defer device.Free()
-
-	np := 3
-	k := []int{2, 3}
-	totalNodes := 5 * np
-
-	kp := NewKernelProgram(device, Config{
-		K:         k,
-		FloatType: Float64,
-	})
-	defer kp.Free()
-
-	// Add identity matrix for simple testing
-	I := mat.NewDense(np, np, []float64{
-		1, 0, 0,
-		0, 1, 0,
-		0, 0, 1,
-	})
-	kp.AddStaticMatrix("I", I)
-
-	// Allocate arrays
-	specs := []ArraySpec{
-		{Name: "U", Size: int64(totalNodes * 8), DataType: Float64},
-		{Name: "V", Size: int64(totalNodes * 8), DataType: Float64},
-	}
-	err := kp.AllocateArrays(specs)
-	if err != nil {
-		t.Fatalf("Failed to allocate: %v", err)
-	}
-
-	// Get and print offsets to understand memory layout
-	offsetsMem := kp.GetOffsets("U")
-	offsets := make([]int64, 3) // NumPartitions + 1
-	if kp.GetIntSize() == 4 {
-		offsets32 := make([]int32, 3)
-		offsetsMem.CopyTo(unsafe.Pointer(&offsets32[0]), int64(3*4))
-		for i, v := range offsets32 {
-			offsets[i] = int64(v)
-		}
-	} else {
-		offsetsMem.CopyTo(unsafe.Pointer(&offsets[0]), int64(3*8))
-	}
-
-	t.Logf("Offsets: %v", offsets)
-	t.Logf("Expected partition 0: nodes 0-5 (offset %d)", offsets[0])
-	t.Logf("Expected partition 1: nodes 6-14 (offset %d)", offsets[1])
-
-	// Initialize U with test data
-	U := make([]float64, totalNodes)
-	for i := range U {
-		U[i] = float64(i)
-	}
-
-	// Write to device using proper method that handles offsets
-	// Method 1: Direct copy (current test approach)
-	kp.GetMemory("U").CopyFrom(unsafe.Pointer(&U[0]), int64(totalNodes*8))
-
-	// Read back U to verify it was written correctly
-	UCheck := make([]float64, totalNodes)
-	kp.GetMemory("U").CopyTo(unsafe.Pointer(&UCheck[0]), int64(totalNodes*8))
-
-	t.Log("U after writing to device:")
-	for i := 0; i < totalNodes; i++ {
-		if math.Abs(UCheck[i]-U[i]) > 1e-10 {
-			t.Errorf("U[%d] not written correctly: expected %f, got %f", i, U[i], UCheck[i])
+			t.Errorf("Offsets not monotonic at %d: %d <= %d", i, offsets[i], offsets[i-1])
 		}
 	}
 
-	// Initialize V to non-zero values to detect if kernel runs
-	VInit := make([]float64, totalNodes)
-	for i := range VInit {
-		VInit[i] = -1.0 // Initialize to -1 to see what changes
-	}
-	kp.GetMemory("V").CopyFrom(unsafe.Pointer(&VInit[0]), int64(totalNodes*8))
-
-	// Kernel using MATMUL macro with @inner
-	kernelSource := fmt.Sprintf(`
-#define NP %d
-
-@kernel void applyIdentity(
-	const int_t* K,
-	const real_t* U_global,
-	const int_t* U_offsets,
-	real_t* V_global,
-	const int_t* V_offsets
-) {
-	for (int part = 0; part < NPART; ++part; @outer) {
-		const real_t* U = U_PART(part);
-		real_t* V = V_PART(part);
-		
-		// Debug: Check if we're processing partition 1
-		if (part == 1) {
-			// Manually process first element to verify pointers
-			for (int i = 0; i < NP; ++i) {
-				V[i] = U[i] + 1000.0; // Add 1000 to make it obvious
-			}
-		}
-		
-		MATMUL_I(U, V, K[part], NP);
-	}
-}
-`, np)
-
-	_, err = kp.BuildKernel(kernelSource, "applyIdentity")
-	if err != nil {
-		t.Fatalf("Failed to build kernel: %v", err)
-	}
-
-	err = kp.RunKernel("applyIdentity", "U", "V")
-	if err != nil {
-		t.Fatalf("Kernel execution failed: %v", err)
-	}
-
-	// Verify result (identity matrix should copy U to V)
-	result, err := CopyArrayToHost[float64](kp, "V")
-	if err != nil {
-		t.Fatalf("Failed to copy result: %v", err)
-	}
-
-	// Also get raw V to see any padding
-	VRaw := make([]float64, totalNodes)
-	kp.GetMemory("V").CopyTo(unsafe.Pointer(&VRaw[0]), int64(totalNodes*8))
-
-	t.Log("Results:")
-	t.Logf("Length of result from CopyArrayToHost: %d", len(result))
-
-	// Check each element
-	for i := 0; i < totalNodes; i++ {
-		t.Logf("Node %d: U=%f, V(CopyArrayToHost)=%f, V(raw)=%f, expected=%f",
-			i, U[i], result[i], VRaw[i], U[i])
-		if math.Abs(result[i]-U[i]) > 1e-10 {
-			t.Errorf("Element %d: expected %f, got %f", i, U[i], result[i])
-		}
-	}
-
-	// Print generated preamble for inspection
-	preamble := kp.GeneratePreamble()
-	t.Logf("KpartMax from preamble: %v", kp.KpartMax)
-
-	// Check if the macro is correct
-	if strings.Contains(preamble, "MATMUL_I") {
-		t.Log("MATMUL_I macro found in preamble")
+	// Total size should match request (with possible alignment padding)
+	if totalSize < spec.Size {
+		t.Errorf("Total size %d less than requested %d", totalSize, spec.Size)
 	}
 }

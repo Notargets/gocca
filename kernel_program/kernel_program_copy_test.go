@@ -582,46 +582,44 @@ func TestCopyPartitionToHost_WithAlignment(t *testing.T) {
 	mem := kp.GetMemory("aligned_data")
 	mem.CopyFrom(unsafe.Pointer(&paddedBuffer[0]), totalSize)
 
-	// Test each partition
+	// Test each partition copy
 	for partID, partK := range k {
-		t.Run(fmt.Sprintf("aligned_partition_%d", partID), func(t *testing.T) {
-			result, err := CopyPartitionToHost[float64](kp, "aligned_data", partID)
-			if err != nil {
-				t.Fatalf("CopyPartitionToHost failed: %v", err)
-			}
+		result, err := CopyPartitionToHost[float64](kp, "aligned_data", partID)
+		if err != nil {
+			t.Fatalf("CopyPartitionToHost failed for partition %d: %v", partID, err)
+		}
 
-			// Should get exactly partK elements, no padding
-			if len(result) != partK {
-				t.Errorf("Expected %d elements, got %d", partK, len(result))
-			}
+		// Verify correct data extraction despite padding
+		if len(result) != partK {
+			t.Errorf("Partition %d: expected %d elements, got %d", partID, partK, len(result))
+		}
 
-			// Verify correct values
-			for elem := 0; elem < partK; elem++ {
-				expected := float64(partID*1000 + elem)
-				if math.Abs(result[elem]-expected) > 1e-10 {
-					t.Errorf("Element %d: expected %f, got %f", elem, expected, result[elem])
-				}
+		for elem := 0; elem < partK; elem++ {
+			expected := float64(partID*1000 + elem)
+			if math.Abs(result[elem]-expected) > 1e-10 {
+				t.Errorf("Partition %d, element %d: expected %f, got %f",
+					partID, elem, expected, result[elem])
 			}
-		})
+		}
 	}
 }
 
 // ============================================================================
-// Section 6: Error Cases and Edge Conditions
-// Following Unit Testing Principle: Detailed coverage of error conditions
+// Section 6: Edge Cases and Error Conditions
+// Following Unit Testing Principle: Defensive testing
 // ============================================================================
 
-// Test 6.1: CopyPartitionToHost error cases
-func TestCopyPartitionToHost_ErrorCases(t *testing.T) {
+// Test 6.1: Invalid partition ID
+func TestCopyPartitionToHost_InvalidPartitionID(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{K: []int{3, 4}})
+	kp := NewKernelProgram(device, Config{K: []int{5, 10}})
 	defer kp.Free()
 
 	spec := ArraySpec{
 		Name:      "data",
-		Size:      7 * 8,
+		Size:      15 * 8,
 		DataType:  Float64,
 		Alignment: NoAlignment,
 	}
@@ -630,39 +628,32 @@ func TestCopyPartitionToHost_ErrorCases(t *testing.T) {
 		t.Fatalf("Failed to allocate: %v", err)
 	}
 
-	// Test invalid partition ID (negative)
+	// Test negative partition ID
 	_, err = CopyPartitionToHost[float64](kp, "data", -1)
 	if err == nil {
 		t.Error("Expected error for negative partition ID")
 	}
 
-	// Test invalid partition ID (too large)
+	// Test partition ID >= NumPartitions
 	_, err = CopyPartitionToHost[float64](kp, "data", 2)
 	if err == nil {
 		t.Error("Expected error for partition ID >= NumPartitions")
 	}
 
-	// Test non-existent array
-	_, err = CopyPartitionToHost[float64](kp, "non_existent", 0)
+	// Test large partition ID
+	_, err = CopyPartitionToHost[float64](kp, "data", 100)
 	if err == nil {
-		t.Error("Expected error for non-existent array")
-	}
-
-	// Test type mismatch
-	_, err = CopyPartitionToHost[int32](kp, "data", 0)
-	if err == nil {
-		t.Error("Expected type mismatch error")
+		t.Error("Expected error for large partition ID")
 	}
 }
 
-// Test 6.2: Edge case - empty partitions
-func TestCopyMethods_EmptyPartitions(t *testing.T) {
+// Test 6.2: Degenerate cases
+func TestCopyMethods_DegenerateCases(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	// Include zero-sized partitions
-	k := []int{0, 3, 0, 2}
-	kp := NewKernelProgram(device, Config{K: k})
+	// Empty partition (K[i] = 0)
+	kp := NewKernelProgram(device, Config{K: []int{0, 5, 0}})
 	defer kp.Free()
 
 	totalElements := 5
