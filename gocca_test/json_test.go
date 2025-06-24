@@ -1,4 +1,4 @@
-package gocca_test_test
+package gocca_test
 
 import (
 	"fmt"
