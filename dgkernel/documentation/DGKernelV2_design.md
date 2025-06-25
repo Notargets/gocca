@@ -225,6 +225,82 @@ builder.Validate() // Returns error if:
 // - Tagged data groups are not found
 ```
 
+## Operator Naming System
+
+### Adaptive Minimal Naming
+
+DGKernelV2 automatically generates the minimal operator names needed to distinguish between implementations. Names grow in complexity only as needed.
+
+#### Naming Algorithm
+
+The system detects which tags vary across operator implementations and includes only the distinguishing tags in generated names:
+
+1. **Single Implementation**: If only one variant exists, use the base operator name
+2. **Multiple Variants**: Include only tags that differ between implementations
+3. **Consistent Expansion**: When new variants are added, names expand systematically
+
+#### Naming Evolution Example
+
+```go
+// Stage 1: Simple implementation (only TET P3)
+ops.RegisterOperator("Gradient", Tags{ElementType: TET, Order: 3}, ...)
+// Generated name: Gradient()
+
+// Stage 2: Add another order
+ops.RegisterOperator("Gradient", Tags{ElementType: TET, Order: 4}, ...)
+// Generated names: Gradient_P3(), Gradient_P4()
+
+// Stage 3: Add another element type
+ops.RegisterOperator("Gradient", Tags{ElementType: HEX, Order: 2}, ...)
+// Generated names: Gradient_TET_P3(), Gradient_TET_P4(), Gradient_HEX_P2()
+
+// Stage 4: Add basis variant
+ops.RegisterOperator("Gradient", Tags{ElementType: TET, Order: 3, Basis: "Modal"}, ...)
+// Generated names: 
+// - Gradient_TET_P3_Nodal()
+// - Gradient_TET_P3_Modal()
+// - Gradient_TET_P4() (no modal variant, so no basis tag needed)
+// - Gradient_HEX_P2()
+```
+
+#### Tag Precedence
+
+When disambiguation is needed, tags are included in this order:
+1. ElementType (formatted as TET, HEX, etc.)
+2. Order (formatted as P{n})
+3. Basis (if multiple bases exist)
+4. Method (if multiple methods exist)
+5. Custom variants (as needed)
+
+#### Kernel Usage
+
+The adaptive naming creates progressively more detailed kernel code as complexity grows:
+
+```c
+// Simple kernel when only one implementation exists
+@kernel void computeRHS(...) {
+    Gradient(u, ux, uy, uz);
+}
+
+// After adding multiple orders
+@kernel void computeRHS(...) {
+    if (order == 3) {
+        Gradient_P3(u, ux, uy, uz);
+    } else if (order == 4) {
+        Gradient_P4(u, ux, uy, uz);
+    }
+}
+
+// Full complexity with mixed elements
+@kernel void computeRHS(...) {
+    if (etype == TET && order == 3) {
+        Gradient_TET_P3_Nodal(u, ux, uy, uz);
+    } else if (etype == HEX && order == 2) {
+        Gradient_HEX_P2(u, ux, uy, uz);
+    }
+}
+```
+
 ## Usage Patterns
 
 ### Basic DG Simulation Setup
@@ -253,8 +329,8 @@ kernel := builder.Build()
 ```go
 // Register multiple orders of the same element type
 for order := 1; order <= 4; order++ {
-    tags := Tags{ElementType: TET, Order: order, ComputeStrides: NodalStrideComputer}
-    pallette.AddMatrixGroup(fmt.Sprintf("TetP%d", order), tags, ...)
+tags := Tags{ElementType: TET, Order: order, ComputeStrides: NodalStrideComputer}
+pallette.AddMatrixGroup(fmt.Sprintf("TetP%d", order), tags, ...)
 }
 
 // Kernel branches on both element type AND order
