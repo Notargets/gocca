@@ -111,10 +111,17 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 
 	for step := 0; step < Nsteps; step++ {
 		for INTRK := 0; INTRK < 5; INTRK++ {
-			// Each RK stage follows the proper sequence
-			dgKernel.ExecuteStage("faceCompute")    // Compute face fluxes
+			// Ghost exchange for remote faces (if multi-partition)
+			if hasRemoteFaces {
+				dgKernel.ExecuteStage("ghostExchange")
+				mpiExchangeGhostData()  // Host-side MPI
+			}
+
+			// Compute face fluxes (P values fetched directly via indices)
+			dgKernel.ExecuteStage("faceCompute")
+
+			// Compute RHS and update solution
 			dgKernel.ExecuteStage("computeRHS", rk4a[INTRK], rk4b[INTRK]*dt)
-			dgKernel.ExecuteStage("faceExchange")   // Gather neighbor values for next stage
 		}
 	}
 
@@ -159,10 +166,11 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
             }`,
         })
     
-    // Stage 2: Face compute - gather P values and compute flux
+    // Stage 2: Face compute - directly fetch P values using indices
     builder.AddStage("faceCompute",
         kernel_program.StageSpec{
-            Inputs:  []string{"u", "uP", "nx", "ny", "nz", "Fscale", "vmapM"},
+            Inputs:  []string{"u", "nx", "ny", "nz", "Fscale", "vmapM", 
+                             "localPIndices", "faceTypes"},
             Outputs: []string{"faceFlux"},
             Source: `
             for (int elem = 0; elem < K[part]; ++elem; @inner) {
@@ -174,12 +182,25 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
                     int vidM = vmapM_PART(part)[faceIdx] % NP_TET;
                     real_t uM = u_PART(part)[elem*NP_TET + vidM];
                     
-                    // P value already gathered in faceExchange stage
-                    real_t uR = uP_PART(part)[faceIdx];
+                    // Get P value based on face type
+                    real_t uP;
+                    int faceType = faceTypes_PART(part)[faceIdx];
+                    
+                    if (faceType == INTERIOR_FACE) {
+                        // Interior face: use localPIndices to find P location
+                        int pIdx = localPIndices_PART(part)[faceIdx];
+                        uP = u_global[pIdx];  // Direct fetch from global array
+                    } else if (faceType == BOUNDARY_FACE) {
+                        // Boundary: apply BC (free boundary in this case)
+                        uP = uM;
+                    } else { // REMOTE_FACE
+                        // Remote face: value will be in ghost buffer after MPI exchange
+                        uP = ghostFaceBuffer_PART(part)[faceIdx];
+                    }
                     
                     // Compute Lax-Friedrichs flux
-                    real_t alpha = fmax(fabs(uM), fabs(uR));
-                    real_t Fn = 0.5 * (uM*uM + uR*uR) / 2.0 + 0.5 * alpha * (uM - uR);
+                    real_t alpha = fmax(fabs(uM), fabs(uP));
+                    real_t Fn = 0.5 * (uM*uM + uP*uP) / 2.0 + 0.5 * alpha * (uM - uP);
                     
                     // Project onto normal and scale
                     real_t nx_val = nx_PART(part)[faceIdx];
@@ -243,34 +264,26 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
             }`,
         })
     
-    // Stage 4: Face exchange - gather neighbor values for next iteration
-    builder.AddStage("faceExchange",
+    // Stage 4: Ghost exchange for remote faces (if using MPI)
+    builder.AddStage("ghostExchange",
         kernel_program.StageSpec{
-            Inputs:  []string{"u", "faceBuffer"},  // faceBuffer contains connectivity
-            Updates: []string{"uP"},
+            Inputs:  []string{"u", "remoteSendIndices"},
+            Outputs: []string{"ghostFaceBuffer"},
             Source: `
-            // Use FaceBuffer to efficiently gather P values
-            // For interior faces: get from LocalPIndices
-            // For boundary faces: apply BC
-            // For remote faces: will be filled by MPI/inter-partition exchange
+            // This stage only handles packing data for MPI send
+            // The actual MPI exchange happens between kernel calls
             
-            for (int i = 0; i < totalInteriorFaces; ++i; @inner) {
-                int mIdx = interiorFaceIndices[i];    // M position 
-                int pIdx = localPIndices[i];          // P position in M buffer
-                
-                // P value comes from the M buffer at the P position
-                uP_PART(part)[mIdx] = u_global[pIdx];
-            }
-            
-            // Boundary faces
-            for (int i = 0; i < totalBoundaryFaces; ++i; @inner) {
-                int mIdx = boundaryFaceIndices[i];
-                int vidM = vmapM_PART(part)[mIdx] % NP_TET;
+            // Pack values that need to be sent to other partitions
+            for (int i = 0; i < numRemoteSends; ++i; @inner) {
+                int mIdx = remoteSendIndices[i];
+                int vidM = vmapM_global[mIdx] % NP_TET;
                 int elem = mIdx / (NFP_TET * 4);
                 
-                // Free boundary: uP = uM
-                uP_PART(part)[mIdx] = u_PART(part)[elem*NP_TET + vidM];
-            }`,
+                sendBuffer[i] = u_global[elem*NP_TET + vidM];
+            }
+            
+            // After this kernel, host code does MPI exchange
+            // Then unpacks received values into ghostFaceBuffer`,
         })
     
     return builder.Build()
@@ -293,16 +306,23 @@ dgKernel.AllocateArray(name, int64(K*Np*8))
 }
 
 // Face arrays: K*Nfp*4 elements
-faceArrays := []string{"uP", "faceFlux", "nx", "ny", "nz", "Fscale", "vmapM", "vmapP"}
+faceArrays := []string{"faceFlux", "nx", "ny", "nz", "Fscale", "vmapM"}
 for _, name := range faceArrays {
 dgKernel.AllocateArray(name, int64(K*Nfp*4*8))
 }
 
-// Face buffer indices (precomputed from FaceBuffer)
-// These would be computed once and stored
-dgKernel.AllocateArray("localPIndices", int64(K*Nfp*2*8))      // ~half are interior
-dgKernel.AllocateArray("interiorFaceIndices", int64(K*Nfp*2*8))
-dgKernel.AllocateArray("boundaryFaceIndices", int64(K*Nfp*2*8))
+// Face buffer data (from FaceBuffer preprocessing)
+// localPIndices: P location for each interior face point
+// faceTypes: classification of each face point
+dgKernel.AllocateArray("localPIndices", int64(K*Nfp*4*4))  // int32
+dgKernel.AllocateArray("faceTypes", int64(K*Nfp*4))        // uint8
+
+// Ghost buffer for remote faces (if multi-partition)
+numRemoteFaces := countRemoteFaces(el)
+if numRemoteFaces > 0 {
+dgKernel.AllocateArray("ghostFaceBuffer", int64(numRemoteFaces*8))
+dgKernel.AllocateArray("remoteSendIndices", int64(numRemoteFaces*4))
+}
 }
 
 func copyMeshData(dgKernel *kernel_program.DGKernel, el *DG3D.Element3D) {
