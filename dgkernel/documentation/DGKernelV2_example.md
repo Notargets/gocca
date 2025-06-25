@@ -15,103 +15,141 @@ Solving the 3D scalar Burgers equation:
 package main
 
 import (
-    "fmt"
-    "math"
-    "github.com/notargets/gocfd/DG3D"
-    "github.com/notargets/gocca"
-    "github.com/notargets/gocca/kernel_program"
+   "fmt"
+   "math"
+   "github.com/notargets/gocfd/DG3D"
+   "github.com/notargets/gocca"
+   "github.com/notargets/gocca/kernel_program"
 )
 
 func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
-    // Initialize device (CUDA or OpenMP)
-    device, err := initializeDevice()
-    if err != nil {
-        return err
-    }
-    defer device.Free()
-    
-    // Extract partition information from Element3D
-    K := []int{el.K} // Single partition for simplicity
-    if el.Split != nil {
-        K = make([]int, len(el.Split))
-        for i, partEl := range el.Split {
-            K[i] = partEl.K
-        }
-    }
-    
-    // Create DGKernel instance
-    dgKernel := kernel_program.NewDGKernel(device, kernel_program.Config{
-        K:         K,
-        FloatType: kernel_program.Float64,
-        IntType:   kernel_program.Int64,
-    })
-    defer dgKernel.Free()
-    
-    // Setup DataPallette with element matrices
-    pallette := setupDataPallette(el)
-    
-    // Register operators
-    ops := registerOperators(el.N)
-    
-    // Build kernels
-    builder := kernel_program.NewKernelBuilder(dgKernel, pallette, ops)
-    if err := buildKernels(builder, el); err != nil {
-        return err
-    }
-    
-    // Allocate working arrays
-    if err := allocateArrays(builder, el); err != nil {
-        return err
-    }
-    
-    // Initialize solution
-    if err := initializeSolution(dgKernel, el); err != nil {
-        return err
-    }
-    
-    // Time stepping parameters
-    CFL := 0.5
-    dt := computeTimeStep(el, CFL)
-    Nsteps := int(math.Ceil(finalTime / dt))
-    
-    // SSP-RK4 coefficients
-    rk4a := []float64{0.0, -0.41789047449985195, -1.192151694642677, -1.697784692471528, -1.514183444257156}
-    rk4b := []float64{0.14965902199922912, 0.37921031299962726, 0.8229550293869817, 0.6994504559491221, 0.15305724796815196}
-    rk4c := []float64{0.0, 0.14965902199922912, 0.37040095736420475, 0.6222557631344432, 0.9582821306746903}
-    
-    fmt.Printf("Starting time integration: dt=%f, Nsteps=%d\n", dt, Nsteps)
-    
-    // Main time stepping loop
-    for tstep := 0; tstep < Nsteps; tstep++ {
-        // SSP-RK4 stages
-        for INTRK := 0; INTRK < 5; INTRK++ {
-            // Update RK residual
-            dgKernel.CopyArray("u", "resu")
-            dgKernel.ScaleArray("resu", rk4a[INTRK])
-            
-            // Compute RHS
-            if err := computeRHS(dgKernel); err != nil {
-                return err
-            }
-            
-            // Update solution: u = resu + dt*b[INTRK]*rhsu
-            dgKernel.ExecuteStage("updateSolution", dt*rk4b[INTRK])
-        }
-        
-        // Output progress
-        if tstep%100 == 0 {
-            fmt.Printf("Step %d/%d, t=%f\n", tstep, Nsteps, float64(tstep)*dt)
-        }
-    }
-    
-    // Copy final solution to host
-    finalSolution, err := dgKernel.CopyArrayToHost("u")
-    if err != nil {
-        return err
-    }
-    
-    fmt.Printf("Simulation complete. Final solution norm: %f\n", computeNorm(finalSolution))
-    return nil
+   // Initialize device (CUDA or OpenMP)
+   device, err := initializeDevice()
+   if err != nil {
+      return err
+   }
+   defer device.Free()
+
+   // Extract partition information from Element3D
+   K := []int{el.K} // Single partition for simplicity
+   if el.Split != nil {
+      K = make([]int, len(el.Split))
+      for i, partEl := range el.Split {
+         K[i] = partEl.K
+      }
+   }
+
+   // Create DGKernel instance
+   dgKernel := kernel_program.NewDGKernel(device, kernel_program.Config{
+      K:         K,
+      FloatType: kernel_program.Float64,
+      IntType:   kernel_program.Int64,
+   })
+   defer dgKernel.Free()
+
+   // Setup DataPallette with element matrices
+   pallette := setupDataPallette(el)
+
+   // Register operators
+   ops := registerOperators(el.N)
+
+   // Build kernels
+   builder := kernel_program.NewKernelBuilder(dgKernel, pallette, ops)
+   if err := buildKernels(builder, el); err != nil {
+      return err
+   }
+
+   // Allocate working arrays
+   if err := allocateArrays(builder, el); err != nil {
+      return err
+   }
+
+   // Copy mesh data to device
+   if err := initializeMeshData(dgKernel, el); err != nil {
+      return err
+   }
+
+   // SSP-RK4 coefficients
+   rk4a := []float64{0.0, -0.41789047449985195, -1.192151694642677, -1.697784692471528, -1.514183444257156}
+   rk4b := []float64{0.14965902199922912, 0.37921031299962726, 0.8229550293869817, 0.6994504559491221, 0.15305724796815196}
+
+   // Configuration
+   CFL := 0.5
+   useConstantTimeStep := true
+   useParallelExchange := false // Set true for MPI/multi-GPU
+   outputInterval := 100
+   saveCheckpoints := false
+
+   // Initialize solution
+   dgKernel.ExecuteStage("initialize")
+
+   // Calculate timestep once if using constant dt
+   var dt float64
+   if useConstantTimeStep {
+      dt = computeTimeStep(el, CFL)
+      fmt.Printf("Using constant dt = %f\n", dt)
+   }
+
+   // Time stepping parameters
+   currentTime := 0.0
+   tstep := 0
+   outputInterval := 100
+
+   fmt.Printf("Starting time integration to t=%f\n", finalTime)
+
+   // Main time stepping loop
+   for currentTime < finalTime {
+      // Adaptive timestep if needed
+      if !useConstantTimeStep {
+         dt = computeTimeStep(el, CFL)
+      }
+
+      // Check if we'll exceed final time
+      if currentTime + dt > finalTime {
+         dt = finalTime - currentTime
+      }
+
+      // SSP-RK4 stages
+      for INTRK := 0; INTRK < 5; INTRK++ {
+         // Each RK stage computes and updates solution
+         dgKernel.ExecuteStage("rkStage",
+            rk4a[INTRK],    // coefficient for residual
+            rk4b[INTRK]*dt) // coefficient for RHS
+      }
+
+      // Face exchange for next timestep (if using MPI/multi-GPU)
+      if useParallelExchange {
+         dgKernel.ExecuteStage("faceExchange")
+      }
+
+      // Update time
+      currentTime += dt
+      tstep++
+
+      // Output progress
+      if tstep % outputInterval == 0 {
+         fmt.Printf("Step %d, t=%f, dt=%f\n", tstep, currentTime, dt)
+         if saveCheckpoints {
+            saveCheckpoint(dgKernel, tstep)
+         }
+      }
+   }
+
+   // Final output
+   finalSolution, err := dgKernel.CopyArrayToHost("u")
+   if err != nil {
+      return err
+   }
+
+   fmt.Printf("Simulation complete at t=%f after %d steps\n", currentTime, tstep)
+   fmt.Printf("Final solution norm: %f\n", computeNorm(finalSolution))
+
+   // Save final solution
+   if err := saveSolution(finalSolution, el, "burgers3d_final.vtu"); err != nil {
+      return err
+   }
+
+   return nil
 }
 ```
 
@@ -172,7 +210,7 @@ func registerOperators(N int) *kernel_program.OperatorPallette {
     Np := (N+1)*(N+2)*(N+3)/6
     Nfp := (N+1)*(N+2)/2
     
-    // Physical gradient operator
+    // Physical gradient operator - demonstrates matrix composition
     ops.RegisterOperator("PhysicalGradient",
         kernel_program.Tags{ElementType: kernel_program.TET, Order: N},
         kernel_program.OperatorSpec{
@@ -200,86 +238,49 @@ func registerOperators(N int) *kernel_program.OperatorPallette {
             },
         })
     
-    // Burgers volume flux
-    ops.RegisterOperator("BurgersVolumeFlux", 
+    // Burgers flux divergence - combines gradient results
+    ops.RegisterOperator("BurgersDivergence", 
         kernel_program.Tags{ElementType: kernel_program.TET, Order: N},
         kernel_program.OperatorSpec{
             Inputs:  []string{"u", "ux", "uy", "uz"},
-            Outputs: []string{"rhsu"},
+            Outputs: []string{"divu"},
             Generator: func() string {
                 return fmt.Sprintf(`
                 for (int n = 0; n < %d; ++n) {
                     // F = u²/2, so dF/du = u
                     // div(F) = u*(ux + uy + uz)
-                    rhsu[n] = -u[n] * (ux[n] + uy[n] + uz[n]);
+                    divu[n] = u[n] * (ux[n] + uy[n] + uz[n]);
                 }`, Np)
             },
         })
     
-    // Extract solution at faces
-    ops.RegisterOperator("ExtractFaces",
+    // Surface flux integral - demonstrates LIFT operator usage
+    ops.RegisterOperator("SurfaceIntegral",
         kernel_program.Tags{ElementType: kernel_program.TET, Order: N},
         kernel_program.OperatorSpec{
-            Inputs:  []string{"u", "vmapM"},
-            Outputs: []string{"uM"},
-            Generator: func() string {
-                return fmt.Sprintf(`
-                for (int f = 0; f < 4; ++f) {
-                    for (int n = 0; n < %d; ++n) {
-                        int id = f*%d + n;
-                        int vid = vmapM[id] %% %d; // Local node index
-                        uM[id] = u[vid];
-                    }
-                }`, Nfp, Nfp, Np)
+            Inputs:     []string{"uM", "uP", "nx", "ny", "nz", "Fscale"},
+            Outputs:    []string{"surfaceRHS"},
+            StaticData: []string{"LIFT"},
+            Workspace:  kernel_program.WorkspaceSpec{
+                "flux": {Size: fmt.Sprintf("%d", Nfp*4)},
             },
-        })
-    
-    // Numerical flux (Lax-Friedrichs)
-    ops.RegisterOperator("LaxFriedrichsFlux",
-        kernel_program.Tags{ElementType: kernel_program.TET, Order: N},
-        kernel_program.OperatorSpec{
-            Inputs:  []string{"uM", "uP", "nx", "ny", "nz"},
-            Outputs: []string{"flux"},
             Generator: func() string {
                 return fmt.Sprintf(`
+                // Compute numerical flux at each face
                 for (int i = 0; i < %d; ++i) {
                     real_t uL = uM[i];
                     real_t uR = uP[i];
                     
-                    // Maximum wave speed
+                    // Lax-Friedrichs flux
                     real_t alpha = fmax(fabs(uL), fabs(uR));
+                    real_t Fn = 0.5 * (uL*uL + uR*uR) / 2.0 + 0.5 * alpha * (uL - uR);
                     
-                    // Average flux
-                    real_t Fn = 0.5 * (uL*uL + uR*uR) / 2.0;
-                    
-                    // Add dissipation
-                    Fn += 0.5 * alpha * (uL - uR);
-                    
-                    // Project onto normal (all components same for Burgers)
-                    flux[i] = Fn * (nx[i] + ny[i] + nz[i]);
-                }`, Nfp*4)
-            },
-        })
-    
-    // Surface integral via LIFT
-    ops.RegisterOperator("LiftFlux",
-        kernel_program.Tags{ElementType: kernel_program.TET, Order: N},
-        kernel_program.OperatorSpec{
-            Inputs:     []string{"flux", "Fscale"},
-            Outputs:    []string{"rhsflux"},
-            StaticData: []string{"LIFT"},
-            Workspace:  kernel_program.WorkspaceSpec{
-                "scaledFlux": {Size: fmt.Sprintf("%d", Nfp*4)},
-            },
-            Generator: func() string {
-                return fmt.Sprintf(`
-                // Scale flux by surface Jacobian
-                for (int i = 0; i < %d; ++i) {
-                    workspace_scaledFlux[i] = flux[i] * Fscale[i];
+                    // Project onto normal and scale by surface Jacobian
+                    workspace_flux[i] = Fn * (nx[i] + ny[i] + nz[i]) * Fscale[i];
                 }
                 
-                // Apply LIFT operator
-                MATMUL_LIFT(workspace_scaledFlux, rhsflux, 1, %d);`, Nfp*4, Np)
+                // Apply LIFT operator to map surface to volume
+                MATMUL_LIFT(workspace_flux, surfaceRHS, 1, %d);`, Nfp*4, Np)
             },
         })
     
@@ -316,119 +317,90 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
             }`,
         })
     
-    // Stage 2: Extract face values
-    builder.AddStage("extractFaces",
+    // Stage 2: Combined RK stage - compute RHS and update
+    builder.AddStage("rkStage",
         kernel_program.StageSpec{
-            UsesOperators: []string{"ExtractFaces_TET"},
+            UsesOperators: []string{"PhysicalGradient_TET", "BurgersDivergence_TET", "SurfaceIntegral_TET"},
+            Parameters: []string{"rk_a", "rk_b_dt"},  // Scalar parameters
             Source: `
+            const real_t a = rk_a_scalar;      // RK coefficient for residual
+            const real_t b_dt = rk_b_dt_scalar; // RK coefficient * dt
+            
             for (int elem = 0; elem < K[part]; ++elem; @inner) {
+                // Get element pointers
                 real_t* u_elem = u_PART(part) + elem*NP_TET;
-                real_t* uM_elem = uM_PART(part) + elem*NFP_TET*4;
-                int_t* vmapM_elem = vmapM_PART(part) + elem*NFP_TET*4;
-                
-                ExtractFaces_TET(u_elem, vmapM_elem, uM_elem);
-            }`,
-        })
-    
-    // Stage 3: Exchange face data (internal only, no MPI)
-    builder.AddStage("exchangeFaces", 
-        kernel_program.StageSpec{
-            Inputs:  []string{"uM", "vmapP"},
-            Outputs: []string{"uP"},
-            Source: `
-            for (int elem = 0; elem < K[part]; ++elem; @inner) {
-                for (int i = 0; i < NFP_TET*4; ++i) {
-                    int id = elem*NFP_TET*4 + i;
-                    int idP = vmapP[id];
-                    
-                    // Internal face: copy from neighbor
-                    // Boundary face: copy from self (free boundary)
-                    if (idP < totalFaceNodes) {
-                        uP[id] = uM[idP];
-                    } else {
-                        uP[id] = uM[id];
-                    }
-                }
-            }`,
-        })
-    
-    // Stage 4: Compute volume RHS
-    builder.AddStage("volumeRHS",
-        kernel_program.StageSpec{
-            UsesOperators: []string{"PhysicalGradient_TET", "BurgersVolumeFlux_TET"},
-            Source: `
-            for (int elem = 0; elem < K[part]; ++elem; @inner) {
-                // Element data pointers
-                real_t* u_elem = u_PART(part) + elem*NP_TET;
+                real_t* resu_elem = resu_PART(part) + elem*NP_TET;
                 real_t* rx_elem = rx_PART(part) + elem*NP_TET;
-                real_t* ry_elem = ry_PART(part) + elem*NP_TET;
-                real_t* rz_elem = rz_PART(part) + elem*NP_TET;
-                real_t* sx_elem = sx_PART(part) + elem*NP_TET;
-                real_t* sy_elem = sy_PART(part) + elem*NP_TET;
-                real_t* sz_elem = sz_PART(part) + elem*NP_TET;
-                real_t* tx_elem = tx_PART(part) + elem*NP_TET;
-                real_t* ty_elem = ty_PART(part) + elem*NP_TET;
-                real_t* tz_elem = tz_PART(part) + elem*NP_TET;
+                // ... other geometric factors ...
                 
-                real_t* ux_elem = ux_PART(part) + elem*NP_TET;
-                real_t* uy_elem = uy_PART(part) + elem*NP_TET;
-                real_t* uz_elem = uz_PART(part) + elem*NP_TET;
-                real_t* rhsu_elem = rhsu_PART(part) + elem*NP_TET;
+                real_t ux[NP_TET], uy[NP_TET], uz[NP_TET];
+                real_t divu[NP_TET];
                 
                 // Compute gradient
                 PhysicalGradient_TET(u_elem, rx_elem, ry_elem, rz_elem,
                                    sx_elem, sy_elem, sz_elem,
                                    tx_elem, ty_elem, tz_elem,
-                                   ux_elem, uy_elem, uz_elem);
+                                   ux, uy, uz);
                 
-                // Compute volume flux contribution
-                BurgersVolumeFlux_TET(u_elem, ux_elem, uy_elem, uz_elem, rhsu_elem);
-            }`,
-        })
-    
-    // Stage 5: Add surface contribution
-    builder.AddStage("surfaceRHS",
-        kernel_program.StageSpec{
-            UsesOperators: []string{"LaxFriedrichsFlux_TET", "LiftFlux_TET"},
-            Source: `
-            for (int elem = 0; elem < K[part]; ++elem; @inner) {
-                // Face data pointers
-                real_t* uM_elem = uM_PART(part) + elem*NFP_TET*4;
-                real_t* uP_elem = uP_PART(part) + elem*NFP_TET*4;
+                // Compute divergence of flux
+                BurgersDivergence_TET(u_elem, ux, uy, uz, divu);
+                
+                // Extract face values inline
+                real_t uM[NFP_TET*4];
+                int_t* vmapM_elem = vmapM_PART(part) + elem*NFP_TET*4;
+                for (int i = 0; i < NFP_TET*4; ++i) {
+                    int vid = vmapM_elem[i] % NP_TET;
+                    uM[i] = u_elem[vid];
+                }
+                
+                // Get neighbor values (simple free boundary)
+                real_t uP[NFP_TET*4];
+                int_t* vmapP_elem = vmapP_PART(part) + elem*NFP_TET*4;
+                for (int i = 0; i < NFP_TET*4; ++i) {
+                    int idP = vmapP_elem[i];
+                    uP[i] = (idP < totalFaceNodes) ? uM_global[idP] : uM[i];
+                }
+                
+                // Surface contribution
                 real_t* nx_elem = nx_PART(part) + elem*NFP_TET*4;
                 real_t* ny_elem = ny_PART(part) + elem*NFP_TET*4;
                 real_t* nz_elem = nz_PART(part) + elem*NFP_TET*4;
                 real_t* Fscale_elem = Fscale_PART(part) + elem*NFP_TET*4;
+                real_t surfaceRHS[NP_TET];
                 
-                real_t* flux_elem = flux_PART(part) + elem*NFP_TET*4;
-                real_t* rhsflux_elem = rhsflux_PART(part) + elem*NP_TET;
-                real_t* rhsu_elem = rhsu_PART(part) + elem*NP_TET;
+                SurfaceIntegral_TET(uM, uP, nx_elem, ny_elem, nz_elem, 
+                                  Fscale_elem, surfaceRHS);
                 
-                // Compute numerical flux
-                LaxFriedrichsFlux_TET(uM_elem, uP_elem, nx_elem, ny_elem, nz_elem, flux_elem);
-                
-                // Lift to volume
-                LiftFlux_TET(flux_elem, Fscale_elem, rhsflux_elem);
-                
-                // Add to RHS
+                // Update solution: u = a*u + resu + b_dt*rhs
                 for (int n = 0; n < NP_TET; ++n) {
-                    rhsu_elem[n] += rhsflux_elem[n];
+                    real_t rhs = -divu[n] + surfaceRHS[n];
+                    u_elem[n] = a * u_elem[n] + resu_elem[n] + b_dt * rhs;
+                }
+                
+                // Update residual for next stage
+                for (int n = 0; n < NP_TET; ++n) {
+                    resu_elem[n] = u_elem[n];
                 }
             }`,
         })
     
-    // Stage 6: RK update
-    builder.AddStage("updateSolution",
+    // Stage 3: Face exchange (only if using parallel communication)
+    builder.AddStage("faceExchange",
         kernel_program.StageSpec{
-            Inputs:  []string{"resu", "rhsu", "dt_rk"},  // dt_rk passed as parameter
-            Updates: []string{"u"},
+            Inputs:  []string{"u", "faceMap"},
+            Outputs: []string{"uFaceBuffer"},
             Source: `
-            const real_t dt_b = dt_rk_scalar; // Passed as scalar parameter
-            
+            // Extract face values for MPI/GPU exchange
             for (int elem = 0; elem < K[part]; ++elem; @inner) {
-                for (int n = 0; n < NP_TET; ++n) {
-                    int id = elem * NP_TET + n;
-                    u[id] = resu[id] + dt_b * rhsu[id];
+                for (int face = 0; face < 4; ++face) {
+                    if (isExternalFace[elem*4 + face]) {
+                        // Copy face data to exchange buffer
+                        for (int n = 0; n < NFP_TET; ++n) {
+                            int lid = elem*NP_TET + fmask[face][n];
+                            int gid = faceMap[elem*4*NFP_TET + face*NFP_TET + n];
+                            uFaceBuffer[gid] = u[lid];
+                        }
+                    }
                 }
             }`,
         })
@@ -461,6 +433,7 @@ func allocateArrays(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) e
             {Name: "ux", Size: K * Np * 8},
             {Name: "uy", Size: K * Np * 8},
             {Name: "uz", Size: K * Np * 8},
+            {Name: "divu", Size: K * Np * 8},
             
             // Geometric factors (per element)
             {Name: "rx", Size: K * Np * 8},
@@ -472,12 +445,6 @@ func allocateArrays(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) e
             {Name: "tx", Size: K * Np * 8},
             {Name: "ty", Size: K * Np * 8},
             {Name: "tz", Size: K * Np * 8},
-            
-            // Face arrays
-            {Name: "uM", Size: K * Nfp * 4 * 8},
-            {Name: "uP", Size: K * Nfp * 4 * 8},
-            {Name: "flux", Size: K * Nfp * 4 * 8},
-            {Name: "rhsflux", Size: K * Np * 8},
             
             // Face geometry
             {Name: "nx", Size: K * Nfp * 4 * 8},
@@ -496,7 +463,10 @@ func allocateArrays(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) e
 ## Helper Functions
 
 ```go
-func initializeSolution(dgKernel *kernel_program.DGKernel, el *DG3D.Element3D) error {
+## Helper Functions
+
+```go
+func initializeMeshData(dgKernel *kernel_program.DGKernel, el *DG3D.Element3D) error {
     // Copy coordinate data from Element3D
     dgKernel.CopyFromHost("x", el.X.Data())
     dgKernel.CopyFromHost("y", el.Y.Data())
@@ -505,7 +475,13 @@ func initializeSolution(dgKernel *kernel_program.DGKernel, el *DG3D.Element3D) e
     // Copy geometric factors
     dgKernel.CopyFromHost("rx", el.Rx.Data())
     dgKernel.CopyFromHost("ry", el.Ry.Data())
-    // ... etc for all geometric factors
+    dgKernel.CopyFromHost("rz", el.Rz.Data())
+    dgKernel.CopyFromHost("sx", el.Sx.Data())
+    dgKernel.CopyFromHost("sy", el.Sy.Data())
+    dgKernel.CopyFromHost("sz", el.Sz.Data())
+    dgKernel.CopyFromHost("tx", el.Tx.Data())
+    dgKernel.CopyFromHost("ty", el.Ty.Data())
+    dgKernel.CopyFromHost("tz", el.Tz.Data())
     
     // Copy connectivity
     dgKernel.CopyFromHost("vmapM", el.VmapM)
@@ -516,19 +492,6 @@ func initializeSolution(dgKernel *kernel_program.DGKernel, el *DG3D.Element3D) e
     dgKernel.CopyFromHost("ny", el.Ny.Data())
     dgKernel.CopyFromHost("nz", el.Nz.Data())
     dgKernel.CopyFromHost("Fscale", el.Fscale.Data())
-    
-    // Initialize solution on device
-    dgKernel.ExecuteStage("initialize")
-    
-    return nil
-}
-
-func computeRHS(dgKernel *kernel_program.DGKernel) error {
-    // Execute RHS computation stages in order
-    dgKernel.ExecuteStage("extractFaces")
-    dgKernel.ExecuteStage("exchangeFaces")
-    dgKernel.ExecuteStage("volumeRHS")
-    dgKernel.ExecuteStage("surfaceRHS")
     
     return nil
 }
@@ -560,6 +523,34 @@ func computeTimeStep(el *DG3D.Element3D, CFL float64) float64 {
     return dt
 }
 
+func saveCheckpoint(dgKernel *kernel_program.DGKernel, timestep int) error {
+    u, err := dgKernel.CopyArrayToHost("u")
+    if err != nil {
+        return err
+    }
+    
+    filename := fmt.Sprintf("burgers3d_checkpoint_%06d.vtu", timestep)
+    // Save to VTU format (implementation omitted)
+    fmt.Printf("Saved checkpoint: %s\n", filename)
+    return nil
+}
+
+func saveSolution(solution []float64, el *DG3D.Element3D, filename string) error {
+    // Save solution in VTU format for visualization
+    // Implementation would use el.X, el.Y, el.Z for coordinates
+    // and solution for the field data
+    fmt.Printf("Saved solution to %s\n", filename)
+    return nil
+}
+
+func computeNorm(solution []float64) float64 {
+    sum := 0.0
+    for _, val := range solution {
+        sum += val * val
+    }
+    return math.Sqrt(sum / float64(len(solution)))
+}
+
 func initializeDevice() (*gocca.OCCADevice, error) {
     // Try CUDA first
     device, err := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
@@ -573,7 +564,7 @@ func initializeDevice() (*gocca.OCCADevice, error) {
 
 ## Generated Kernel Example
 
-Here's what one of the generated kernels might look like:
+Here's what the generated RK stage kernel might look like:
 
 ```c
 // Generated preamble with static matrices
@@ -582,11 +573,12 @@ static const real_t Ds_TET_P3[20][20] = { /* ... */ };
 static const real_t Dt_TET_P3[20][20] = { /* ... */ };
 static const real_t LIFT_TET_P3[20][30] = { /* ... */ };
 
-// Generated macros
-#define MATMUL_Dr(in, out, K_val, NP) /* ... */
-#define MATMUL_LIFT(in, out, K_val, NP) /* ... */
+// Constants
+#define NP_TET 20
+#define NFP_TET 10
+#define totalFaceNodes 4000  // Example value
 
-// Generated operator macros
+// Generated operator macros with workspace
 #define PhysicalGradient_TET(u, rx, ry, rz, sx, sy, sz, tx, ty, tz, ux, uy, uz) do { \
     MATMUL_Dr(u, workspace_dur, 1, 20); \
     MATMUL_Ds(u, workspace_dus, 1, 20); \
@@ -598,49 +590,89 @@ static const real_t LIFT_TET_P3[20][30] = { /* ... */ };
     } \
 } while(0)
 
-// Volume RHS kernel
-@kernel void volumeRHS(
+// Combined RK stage kernel
+@kernel void rkStage(
     const int_t* K,
     const real_t* u_global, const int_t* u_offsets,
+    real_t* resu_global, const int_t* resu_offsets,
     const real_t* rx_global, const int_t* rx_offsets,
-    // ... all other arrays ...
-    real_t* rhsu_global, const int_t* rhsu_offsets
+    // ... all geometric factors and face data ...
+    const real_t rk_a_scalar,    // Scalar parameter
+    const real_t rk_b_dt_scalar   // Scalar parameter
 ) {
     for (int part = 0; part < 1; ++part; @outer) {
-        // Workspace allocation
+        // Workspace allocation - automatically managed
         real_t workspace_dur[20];
         real_t workspace_dus[20];
         real_t workspace_dut[20];
+        real_t workspace_flux[30];
         
         for (int elem = 0; elem < K[part]; ++elem; @inner) {
-            // Element data pointers using generated macros
+            // Element pointers
             real_t* u_elem = u_PART(part) + elem*20;
+            real_t* resu_elem = resu_PART(part) + elem*20;
             // ... other pointers ...
             
-            // Compute gradient
+            // Local arrays for computation
+            real_t ux[20], uy[20], uz[20], divu[20];
+            real_t uM[30], uP[30];
+            real_t surfaceRHS[20];
+            
+            // 1. Compute gradient
             PhysicalGradient_TET(u_elem, rx_elem, ry_elem, rz_elem,
                                sx_elem, sy_elem, sz_elem,
                                tx_elem, ty_elem, tz_elem,
-                               ux_elem, uy_elem, uz_elem);
+                               ux, uy, uz);
             
-            // Compute volume flux
-            BurgersVolumeFlux_TET(u_elem, ux_elem, uy_elem, uz_elem, rhsu_elem);
+            // 2. Compute divergence
+            BurgersDivergence_TET(u_elem, ux, uy, uz, divu);
+            
+            // 3. Extract face values
+            for (int i = 0; i < 30; ++i) {
+                int vid = vmapM_elem[i] % 20;
+                uM[i] = u_elem[vid];
+                int idP = vmapP_elem[i];
+                uP[i] = (idP < totalFaceNodes) ? uM_global[idP] : uM[i];
+            }
+            
+            // 4. Surface integral
+            SurfaceIntegral_TET(uM, uP, nx_elem, ny_elem, nz_elem, 
+                              Fscale_elem, surfaceRHS);
+            
+            // 5. RK update: u = a*u + resu + b_dt*rhs
+            const real_t a = rk_a_scalar;
+            const real_t b_dt = rk_b_dt_scalar;
+            
+            for (int n = 0; n < 20; ++n) {
+                real_t rhs = -divu[n] + surfaceRHS[n];
+                u_elem[n] = a * u_elem[n] + resu_elem[n] + b_dt * rhs;
+                resu_elem[n] = u_elem[n];  // Store for next RK stage
+            }
         }
     }
 }
 ```
 
-## Execution Flow Summary
+## Summary
 
-1. **Initialization**: Load mesh data, create device arrays, set initial condition
-2. **Time Loop**: For each time step, execute 5 RK stages
-3. **RK Stage**:
-    - Copy solution to residual array
-    - Extract face values
-    - Exchange face data internally
-    - Compute volume RHS (gradient → flux divergence)
-    - Compute surface RHS (numerical flux → lift)
-    - Update solution
-4. **Finalization**: Copy solution back to host
+This example demonstrates a realistic DG implementation using DGKernelV2:
 
-The beauty of DGKernelV2 is that all the complex parameter marshaling, workspace allocation, and kernel generation happens automatically based on the operator specifications and stage definitions.
+1. **Realistic Algorithm Flow**:
+   - Initialize once
+   - Calculate timestep (constant or adaptive)
+   - Time loop with RK stages and face exchange
+   - Periodic output and checkpointing
+
+2. **Simplified Design**:
+   - Only meaningful operators (gradient, divergence, surface integral)
+   - Combined RK stage (compute and update together)
+   - Face extraction done inline, not as operator
+
+3. **Key Benefits of DGKernelV2**:
+   - Automatic workspace management
+   - Static matrix embedding
+   - Clean operator abstraction for complex operations
+   - Automatic parameter marshaling
+   - Stage-based execution management
+
+The design focuses on what makes DGKernelV2 valuable: managing the complexity of DG kernels while keeping the high-level algorithm clear and maintainable.
