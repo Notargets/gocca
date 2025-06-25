@@ -8,62 +8,62 @@ This example demonstrates building a simple 3D Burgers equation solver using DGK
 package main
 
 import (
-    "fmt"
-    "math"
-    "github.com/notargets/gocfd/DG3D"
-    "github.com/notargets/gocca"
-    "github.com/notargets/gocca/kernel_program"
+	"fmt"
+	"math"
+	"github.com/notargets/gocfd/DG3D"
+	"github.com/notargets/gocca"
+	"github.com/notargets/gocca/kernel_program"
 )
 
 func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
-    // Initialize device
-    device, err := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
-    if err != nil {
-        device, err = gocca.NewDevice(`{"mode": "OpenMP"}`)
-    }
-    if err != nil {
-        return err
-    }
-    defer device.Free()
-    
-    // Create DGKernel instance
-    dgKernel := kernel_program.NewDGKernel(device, kernel_program.Config{
-        K:         []int{el.K},  // Single partition
-        FloatType: kernel_program.Float64,
-    })
-    defer dgKernel.Free()
-    
-    // 1. Setup DataPallette
-    pallette := kernel_program.NewDataPallette()
-    pallette.AddMatrixGroup("TetOperators",
-        kernel_program.Tags{
-            ElementType: kernel_program.TET,
-            Order:       el.N,
-            ComputeStrides: func(tags kernel_program.Tags) map[string]int {
-                Np := el.Np
-                Nfp := el.Nfp
-                return map[string]int{"NP": Np, "NFP": Nfp}
-            },
-        },
-        "Dr", el.Dr, "Ds", el.Ds, "Dt", el.Dt, "LIFT", el.LIFT)
-    
-    // 2. Register operators
-    ops := kernel_program.NewOperatorPallette()
-    
-    // Operator: Physical gradient on entire partition
-    ops.RegisterOperator("PhysicalGradient",
-        kernel_program.Tags{ElementType: kernel_program.TET, Order: el.N},
-        kernel_program.OperatorSpec{
-            Inputs:     []string{"u", "rx", "ry", "rz", "sx", "sy", "sz", "tx", "ty", "tz"},
-            Outputs:    []string{"ux", "uy", "uz"},
-            StaticData: []string{"Dr", "Ds", "Dt"},
-            Workspace:  kernel_program.WorkspaceSpec{
-                "ur": {Size: "NP*K"}, 
-                "us": {Size: "NP*K"}, 
-                "ut": {Size: "NP*K"},
-            },
-            Generator: func() string {
-                return `
+	// Initialize device
+	device, err := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
+	if err != nil {
+		device, err = gocca.NewDevice(`{"mode": "OpenMP"}`)
+	}
+	if err != nil {
+		return err
+	}
+	defer device.Free()
+
+	// Create DGKernel instance
+	dgKernel := kernel_program.NewDGKernel(device, kernel_program.Config{
+		K:         []int{el.K},  // Single partition
+		FloatType: kernel_program.Float64,
+	})
+	defer dgKernel.Free()
+
+	// 1. Setup DataPallette
+	pallette := kernel_program.NewDataPallette()
+	pallette.AddMatrixGroup("TetOperators",
+		kernel_program.Tags{
+			ElementType: kernel_program.TET,
+			Order:       el.N,
+			ComputeStrides: func(tags kernel_program.Tags) map[string]int {
+				Np := el.Np
+				Nfp := el.Nfp
+				return map[string]int{"NP": Np, "NFP": Nfp}
+			},
+		},
+		"Dr", el.Dr, "Ds", el.Ds, "Dt", el.Dt, "LIFT", el.LIFT)
+
+	// 2. Register operators
+	ops := kernel_program.NewOperatorPallette()
+
+	// Operator: Physical gradient on entire partition
+	ops.RegisterOperator("PhysicalGradient",
+		kernel_program.Tags{ElementType: kernel_program.TET, Order: el.N},
+		kernel_program.OperatorSpec{
+			Inputs:     []string{"u", "rx", "ry", "rz", "sx", "sy", "sz", "tx", "ty", "tz"},
+			Outputs:    []string{"ux", "uy", "uz"},
+			StaticData: []string{"Dr", "Ds", "Dt"},
+			Workspace:  kernel_program.WorkspaceSpec{
+				"ur": {Size: "NP*K"},
+				"us": {Size: "NP*K"},
+				"ut": {Size: "NP*K"},
+			},
+			Generator: func() string {
+				return `
                 // Apply derivative matrices to entire partition
                 MATMUL_Dr(u, workspace_ur, K[part]);
                 MATMUL_Ds(u, workspace_us, K[part]);
@@ -78,53 +78,56 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
                         uz[id] = rz[id]*workspace_ur[id] + sz[id]*workspace_us[id] + tz[id]*workspace_ut[id];
                     }
                 }`
-            },
-        })
-    
-    // 3. Build kernels with validation
-    builder := kernel_program.NewKernelBuilder(dgKernel, pallette, ops)
-    
-    if err := builder.Validate(); err != nil {
-        return fmt.Errorf("validation failed: %v", err)
-    }
-    
-    if err := buildKernels(builder, el); err != nil {
-        return err
-    }
-    
-    // 4. Allocate arrays and initialize
-    allocateArrays(dgKernel, el)
-    copyMeshData(dgKernel, el)
-    dgKernel.ExecuteStage("initialize")
-    
-    // 5. Time stepping
-    dt := 0.01
-    Nsteps := int(finalTime / dt)
-    
-    // SSP-RK4 coefficients
-    rk4a := []float64{0.0, -0.41789047449985195, -1.192151694642677, 
-                     -1.697784692471528, -1.514183444257156}
-    rk4b := []float64{0.14965902199922912, 0.37921031299962726, 
-                     0.8229550293869817, 0.6994504559491221, 0.15305724796815196}
-    
-    fmt.Printf("Starting time integration: dt=%f, steps=%d\n", dt, Nsteps)
-    
-    for step := 0; step < Nsteps; step++ {
-        for INTRK := 0; INTRK < 5; INTRK++ {
-            dgKernel.ExecuteStage("computeRHS", rk4a[INTRK], rk4b[INTRK]*dt)
-            dgKernel.ExecuteStage("faceExchange")
-        }
-        
-        if step % 100 == 0 {
-            fmt.Printf("Step %d/%d\n", step, Nsteps)
-        }
-    }
-    
-    // 6. Output
-    solution, _ := dgKernel.CopyArrayToHost("u")
-    fmt.Printf("Complete. Solution norm: %f\n", norm(solution))
-    
-    return nil
+			},
+		})
+
+	// 3. Build kernels with validation
+	builder := kernel_program.NewKernelBuilder(dgKernel, pallette, ops)
+
+	if err := builder.Validate(); err != nil {
+		return fmt.Errorf("validation failed: %v", err)
+	}
+
+	if err := buildKernels(builder, el); err != nil {
+		return err
+	}
+
+	// 4. Allocate arrays and initialize
+	allocateArrays(dgKernel, el)
+	copyMeshData(dgKernel, el)
+	dgKernel.ExecuteStage("initialize")
+
+	// 5. Time stepping
+	dt := 0.01
+	Nsteps := int(finalTime / dt)
+
+	// SSP-RK4 coefficients
+	rk4a := []float64{0.0, -0.41789047449985195, -1.192151694642677,
+		-1.697784692471528, -1.514183444257156}
+	rk4b := []float64{0.14965902199922912, 0.37921031299962726,
+		0.8229550293869817, 0.6994504559491221, 0.15305724796815196}
+
+	fmt.Printf("Starting time integration: dt=%f, steps=%d\n", dt, Nsteps)
+
+	for step := 0; step < Nsteps; step++ {
+		for INTRK := 0; INTRK < 5; INTRK++ {
+			// Each RK stage follows the proper sequence
+			dgKernel.ExecuteStage("faceCompute")    // Compute face fluxes
+			dgKernel.ExecuteStage("computeRHS", rk4a[INTRK], rk4b[INTRK]*dt)
+			dgKernel.ExecuteStage("faceExchange")   // Gather neighbor values for next stage
+		}
+	}
+
+	if step % 100 == 0 {
+		fmt.Printf("Step %d/%d\n", step, Nsteps)
+	}
+}
+
+// 6. Output
+solution, _ := dgKernel.CopyArrayToHost("u")
+fmt.Printf("Complete. Solution norm: %f\n", norm(solution))
+
+return nil
 }
 ```
 
@@ -156,7 +159,40 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
             }`,
         })
     
-    // Stage 2: Compute RHS with operator
+    // Stage 2: Face compute - gather P values and compute flux
+    builder.AddStage("faceCompute",
+        kernel_program.StageSpec{
+            Inputs:  []string{"u", "uP", "nx", "ny", "nz", "Fscale", "vmapM"},
+            Outputs: []string{"faceFlux"},
+            Source: `
+            for (int elem = 0; elem < K[part]; ++elem; @inner) {
+                // For each face point in this element
+                for (int i = 0; i < NFP_TET*4; ++i) {
+                    int faceIdx = elem*NFP_TET*4 + i;
+                    
+                    // Get M value from current element
+                    int vidM = vmapM_PART(part)[faceIdx] % NP_TET;
+                    real_t uM = u_PART(part)[elem*NP_TET + vidM];
+                    
+                    // P value already gathered in faceExchange stage
+                    real_t uR = uP_PART(part)[faceIdx];
+                    
+                    // Compute Lax-Friedrichs flux
+                    real_t alpha = fmax(fabs(uM), fabs(uR));
+                    real_t Fn = 0.5 * (uM*uM + uR*uR) / 2.0 + 0.5 * alpha * (uM - uR);
+                    
+                    // Project onto normal and scale
+                    real_t nx_val = nx_PART(part)[faceIdx];
+                    real_t ny_val = ny_PART(part)[faceIdx];
+                    real_t nz_val = nz_PART(part)[faceIdx];
+                    real_t Fscale_val = Fscale_PART(part)[faceIdx];
+                    
+                    faceFlux_PART(part)[faceIdx] = Fn * (nx_val + ny_val + nz_val) * Fscale_val;
+                }
+            }`,
+        })
+    
+    // Stage 3: Compute RHS with gradient operator and face flux
     builder.AddStage("computeRHS",
         kernel_program.StageSpec{
             UsesOperators: []string{"PhysicalGradient_TET"},
@@ -165,7 +201,7 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
             const real_t a = rk_a_scalar;
             const real_t b_dt = rk_b_dt_scalar;
             
-            // Allocate local arrays for the partition
+            // Allocate gradient arrays for the partition
             real_t ux[NP_TET * K[part]];
             real_t uy[NP_TET * K[part]];
             real_t uz[NP_TET * K[part]];
@@ -177,7 +213,7 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
                                tx_PART(part), ty_PART(part), tz_PART(part),
                                ux, uy, uz);
             
-            // Now compute flux divergence and surface terms element by element
+            // Process each element
             for (int elem = 0; elem < K[part]; ++elem; @inner) {
                 // Update residual
                 for (int n = 0; n < NP_TET; ++n) {
@@ -192,34 +228,12 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
                     rhs[n] = -u_PART(part)[id] * (ux[id] + uy[id] + uz[id]);
                 }
                 
-                // Extract face values
-                real_t uM[NFP_TET*4];
-                int_t* vmapM_elem = vmapM_PART(part) + elem*NFP_TET*4;
-                for (int i = 0; i < NFP_TET*4; ++i) {
-                    int vid = vmapM_elem[i] % NP_TET;
-                    uM[i] = u_PART(part)[elem*NP_TET + vid];
-                }
+                // Get precomputed face flux for this element
+                real_t* flux_elem = faceFlux_PART(part) + elem*NFP_TET*4;
                 
-                // Get neighbor values
-                real_t* uP_elem = uP_PART(part) + elem*NFP_TET*4;
-                real_t* nx_elem = nx_PART(part) + elem*NFP_TET*4;
-                real_t* ny_elem = ny_PART(part) + elem*NFP_TET*4;
-                real_t* nz_elem = nz_PART(part) + elem*NFP_TET*4;
-                real_t* Fscale_elem = Fscale_PART(part) + elem*NFP_TET*4;
-                
-                // Compute numerical flux
-                real_t flux[NFP_TET*4];
-                for (int i = 0; i < NFP_TET*4; ++i) {
-                    real_t uL = uM[i];
-                    real_t uR = uP_elem[i];
-                    real_t alpha = fmax(fabs(uL), fabs(uR));
-                    real_t Fn = 0.5 * (uL*uL + uR*uR) / 2.0 + 0.5 * alpha * (uL - uR);
-                    flux[i] = Fn * (nx_elem[i] + ny_elem[i] + nz_elem[i]) * Fscale_elem[i];
-                }
-                
-                // Apply LIFT (single element)
+                // Apply LIFT to face flux
                 real_t lifted[NP_TET];
-                MATMUL_LIFT(flux, lifted, 1);
+                MATMUL_LIFT(flux_elem, lifted, 1);
                 
                 // Update solution
                 for (int n = 0; n < NP_TET; ++n) {
@@ -229,26 +243,33 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
             }`,
         })
     
-    // Stage 3: Face exchange
+    // Stage 4: Face exchange - gather neighbor values for next iteration
     builder.AddStage("faceExchange",
         kernel_program.StageSpec{
-            Inputs:  []string{"u", "vmapP", "vmapM"},
+            Inputs:  []string{"u", "faceBuffer"},  // faceBuffer contains connectivity
             Updates: []string{"uP"},
             Source: `
-            for (int elem = 0; elem < K[part]; ++elem; @inner) {
-                real_t* uP_elem = uP_PART(part) + elem*NFP_TET*4;
-                int_t* vmapP_elem = vmapP_PART(part) + elem*NFP_TET*4;
-                int_t* vmapM_elem = vmapM_PART(part) + elem*NFP_TET*4;
+            // Use FaceBuffer to efficiently gather P values
+            // For interior faces: get from LocalPIndices
+            // For boundary faces: apply BC
+            // For remote faces: will be filled by MPI/inter-partition exchange
+            
+            for (int i = 0; i < totalInteriorFaces; ++i; @inner) {
+                int mIdx = interiorFaceIndices[i];    // M position 
+                int pIdx = localPIndices[i];          // P position in M buffer
                 
-                for (int i = 0; i < NFP_TET*4; ++i) {
-                    int idP = vmapP_elem[i];
-                    if (idP < totalFaceNodes) {
-                        uP_elem[i] = u_global[idP];
-                    } else {
-                        int vid = vmapM_elem[i] % NP_TET;
-                        uP_elem[i] = u_PART(part)[elem*NP_TET + vid];
-                    }
-                }
+                // P value comes from the M buffer at the P position
+                uP_PART(part)[mIdx] = u_global[pIdx];
+            }
+            
+            // Boundary faces
+            for (int i = 0; i < totalBoundaryFaces; ++i; @inner) {
+                int mIdx = boundaryFaceIndices[i];
+                int vidM = vmapM_PART(part)[mIdx] % NP_TET;
+                int elem = mIdx / (NFP_TET * 4);
+                
+                // Free boundary: uP = uM
+                uP_PART(part)[mIdx] = u_PART(part)[elem*NP_TET + vidM];
             }`,
         })
     
@@ -260,40 +281,46 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
 
 ```go
 func allocateArrays(dgKernel *kernel_program.DGKernel, el *DG3D.Element3D) {
-    Np := el.Np
-    Nfp := el.Nfp
-    K := el.K
-    
-    // Volume arrays: K*Np elements
-    volumeArrays := []string{"x", "y", "z", "u", "resu", 
-                            "rx", "ry", "rz", "sx", "sy", "sz", "tx", "ty", "tz"}
-    for _, name := range volumeArrays {
-        dgKernel.AllocateArray(name, int64(K*Np*8))
-    }
-    
-    // Face arrays: K*Nfp*4 elements
-    faceArrays := []string{"uP", "nx", "ny", "nz", "Fscale", "vmapM", "vmapP"}
-    for _, name := range faceArrays {
-        dgKernel.AllocateArray(name, int64(K*Nfp*4*8))
-    }
+Np := el.Np
+Nfp := el.Nfp
+K := el.K
+
+// Volume arrays: K*Np elements
+volumeArrays := []string{"x", "y", "z", "u", "resu",
+"rx", "ry", "rz", "sx", "sy", "sz", "tx", "ty", "tz"}
+for _, name := range volumeArrays {
+dgKernel.AllocateArray(name, int64(K*Np*8))
+}
+
+// Face arrays: K*Nfp*4 elements
+faceArrays := []string{"uP", "faceFlux", "nx", "ny", "nz", "Fscale", "vmapM", "vmapP"}
+for _, name := range faceArrays {
+dgKernel.AllocateArray(name, int64(K*Nfp*4*8))
+}
+
+// Face buffer indices (precomputed from FaceBuffer)
+// These would be computed once and stored
+dgKernel.AllocateArray("localPIndices", int64(K*Nfp*2*8))      // ~half are interior
+dgKernel.AllocateArray("interiorFaceIndices", int64(K*Nfp*2*8))
+dgKernel.AllocateArray("boundaryFaceIndices", int64(K*Nfp*2*8))
 }
 
 func copyMeshData(dgKernel *kernel_program.DGKernel, el *DG3D.Element3D) {
-    dgKernel.CopyFromHost("x", el.X.Data())
-    dgKernel.CopyFromHost("y", el.Y.Data())
-    dgKernel.CopyFromHost("z", el.Z.Data())
-    dgKernel.CopyFromHost("rx", el.Rx.Data())
-    // ... etc for all arrays
-    dgKernel.CopyFromHost("vmapM", el.VmapM)
-    dgKernel.CopyFromHost("vmapP", el.VmapP)
+dgKernel.CopyFromHost("x", el.X.Data())
+dgKernel.CopyFromHost("y", el.Y.Data())
+dgKernel.CopyFromHost("z", el.Z.Data())
+dgKernel.CopyFromHost("rx", el.Rx.Data())
+// ... etc for all arrays
+dgKernel.CopyFromHost("vmapM", el.VmapM)
+dgKernel.CopyFromHost("vmapP", el.VmapP)
 }
 
 func norm(data []float64) float64 {
-    sum := 0.0
-    for _, v := range data {
-        sum += v * v
-    }
-    return math.Sqrt(sum / float64(len(data)))
+sum := 0.0
+for _, v := range data {
+sum += v * v
+}
+return math.Sqrt(sum / float64(len(data)))
 }
 ```
 
