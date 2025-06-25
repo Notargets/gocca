@@ -1,4 +1,4 @@
-package kernel_program
+package dgkernel
 
 import (
 	"fmt"
@@ -43,8 +43,8 @@ type arrayMetadata struct {
 	dataType DataType
 }
 
-// KernelProgram manages code generation and execution for partition-parallel kernels
-type KernelProgram struct {
+// DGKernel manages code generation and execution for partition-parallel kernels
+type DGKernel struct {
 	// Partition configuration
 	NumPartitions int
 	K             []int
@@ -70,15 +70,15 @@ type KernelProgram struct {
 	pooledMemory map[string]*gocca.OCCAMemory
 }
 
-// Config holds configuration for creating a KernelProgram
+// Config holds configuration for creating a DGKernel
 type Config struct {
 	K         []int
 	FloatType DataType
 	IntType   DataType
 }
 
-// NewKernelProgram creates a new KernelProgram instance
-func NewKernelProgram(device *gocca.OCCADevice, cfg Config) *KernelProgram {
+// NewDGKernel creates a new DGKernel instance
+func NewDGKernel(device *gocca.OCCADevice, cfg Config) *DGKernel {
 	if device == nil {
 		panic("device cannot be nil")
 	}
@@ -117,7 +117,7 @@ func NewKernelProgram(device *gocca.OCCADevice, cfg Config) *KernelProgram {
 		intType = INT64
 	}
 
-	kp := &KernelProgram{
+	kp := &DGKernel{
 		NumPartitions:   len(cfg.K),
 		K:               make([]int, len(cfg.K)),
 		KpartMax:        kpartMax,
@@ -147,7 +147,7 @@ func NewKernelProgram(device *gocca.OCCADevice, cfg Config) *KernelProgram {
 }
 
 // Free releases all resources
-func (kp *KernelProgram) Free() {
+func (kp *DGKernel) Free() {
 	// Free kernels
 	for _, kernel := range kp.kernels {
 		kernel.Free()
@@ -160,12 +160,12 @@ func (kp *KernelProgram) Free() {
 }
 
 // AddStaticMatrix adds a matrix to be embedded as static const in kernels
-func (kp *KernelProgram) AddStaticMatrix(name string, m mat.Matrix) {
+func (kp *DGKernel) AddStaticMatrix(name string, m mat.Matrix) {
 	kp.StaticMatrices[name] = m
 }
 
 // AllocateArrays allocates device memory with automatic offset calculation
-func (kp *KernelProgram) AllocateArrays(specs []ArraySpec) error {
+func (kp *DGKernel) AllocateArrays(specs []ArraySpec) error {
 	for _, spec := range specs {
 		if err := kp.allocateSingleArray(spec); err != nil {
 			return fmt.Errorf("failed to allocate %s: %w", spec.Name, err)
@@ -175,7 +175,7 @@ func (kp *KernelProgram) AllocateArrays(specs []ArraySpec) error {
 }
 
 // allocateSingleArray handles allocation of a single array
-func (kp *KernelProgram) allocateSingleArray(spec ArraySpec) error {
+func (kp *DGKernel) allocateSingleArray(spec ArraySpec) error {
 	// Calculate aligned offsets and total size
 	offsets, totalSize := kp.calculateAlignedOffsetsAndSize(spec)
 
@@ -211,7 +211,7 @@ func (kp *KernelProgram) allocateSingleArray(spec ArraySpec) error {
 }
 
 // calculateAlignedOffsetsAndSize computes partition offsets with alignment
-func (kp *KernelProgram) calculateAlignedOffsetsAndSize(spec ArraySpec) ([]int64, int64) {
+func (kp *DGKernel) calculateAlignedOffsetsAndSize(spec ArraySpec) ([]int64, int64) {
 	offsets := make([]int64, kp.NumPartitions+1)
 	totalElements := kp.getTotalElements()
 	bytesPerElement := spec.Size / int64(totalElements)
@@ -261,7 +261,7 @@ func (kp *KernelProgram) calculateAlignedOffsetsAndSize(spec ArraySpec) ([]int64
 }
 
 // getTotalElements returns sum of all K values
-func (kp *KernelProgram) getTotalElements() int {
+func (kp *DGKernel) getTotalElements() int {
 	total := 0
 	for _, k := range kp.K {
 		total += k
@@ -270,7 +270,7 @@ func (kp *KernelProgram) getTotalElements() int {
 }
 
 // GeneratePreamble generates the kernel preamble with static data and utilities
-func (kp *KernelProgram) GeneratePreamble() string {
+func (kp *DGKernel) GeneratePreamble() string {
 	var sb strings.Builder
 
 	// 1. Type definitions and constants
@@ -290,7 +290,7 @@ func (kp *KernelProgram) GeneratePreamble() string {
 }
 
 // generateTypeDefinitions creates type definitions based on precision settings
-func (kp *KernelProgram) generateTypeDefinitions() string {
+func (kp *DGKernel) generateTypeDefinitions() string {
 	var sb strings.Builder
 
 	// Type definitions
@@ -321,7 +321,7 @@ func (kp *KernelProgram) generateTypeDefinitions() string {
 }
 
 // generateStaticMatrices converts matrices to static array initializations
-func (kp *KernelProgram) generateStaticMatrices() string {
+func (kp *DGKernel) generateStaticMatrices() string {
 	var sb strings.Builder
 
 	if len(kp.StaticMatrices) > 0 {
@@ -336,7 +336,7 @@ func (kp *KernelProgram) generateStaticMatrices() string {
 }
 
 // formatStaticMatrix formats a single matrix as a static C array
-func (kp *KernelProgram) formatStaticMatrix(name string, m mat.Matrix) string {
+func (kp *DGKernel) formatStaticMatrix(name string, m mat.Matrix) string {
 	rows, cols := m.Dims()
 	var sb strings.Builder
 
@@ -372,7 +372,7 @@ func (kp *KernelProgram) formatStaticMatrix(name string, m mat.Matrix) string {
 }
 
 // generatePartitionMacros creates macros for partition data access
-func (kp *KernelProgram) generatePartitionMacros() string {
+func (kp *DGKernel) generatePartitionMacros() string {
 	var sb strings.Builder
 
 	sb.WriteString("// Partition access macros\n")
@@ -390,7 +390,7 @@ func (kp *KernelProgram) generatePartitionMacros() string {
 }
 
 // generateMatrixMacros creates matrix multiplication macros with @inner loop
-func (kp *KernelProgram) generateMatrixMacros() string {
+func (kp *DGKernel) generateMatrixMacros() string {
 	var sb strings.Builder
 
 	sb.WriteString("// Matrix multiplication macros\n")
@@ -436,7 +436,7 @@ func (kp *KernelProgram) generateMatrixMacros() string {
 }
 
 // BuildKernel compiles and registers a kernel with the program
-func (kp *KernelProgram) BuildKernel(kernelSource, kernelName string) (*gocca.OCCAKernel, error) {
+func (kp *DGKernel) BuildKernel(kernelSource, kernelName string) (*gocca.OCCAKernel, error) {
 	// Generate preamble if not already done
 	if kp.kernelPreamble == "" {
 		kp.GeneratePreamble()
@@ -473,7 +473,7 @@ func (kp *KernelProgram) BuildKernel(kernelSource, kernelName string) (*gocca.OC
 }
 
 // RunKernel executes a registered kernel with the given arguments
-func (kp *KernelProgram) RunKernel(name string, args ...interface{}) error {
+func (kp *DGKernel) RunKernel(name string, args ...interface{}) error {
 	kernel, exists := kp.kernels[name]
 	if !exists {
 		return fmt.Errorf("kernel %s not found", name)
@@ -486,7 +486,7 @@ func (kp *KernelProgram) RunKernel(name string, args ...interface{}) error {
 }
 
 // expandKernelArgs transforms user array names to kernel parameter names
-func (kp *KernelProgram) expandKernelArgs(args []interface{}) []interface{} {
+func (kp *DGKernel) expandKernelArgs(args []interface{}) []interface{} {
 	expanded := []interface{}{}
 
 	// Always pass K array first
@@ -516,7 +516,7 @@ func (kp *KernelProgram) expandKernelArgs(args []interface{}) []interface{} {
 }
 
 // GetMemory returns the device memory handle for an array
-func (kp *KernelProgram) GetMemory(arrayName string) *gocca.OCCAMemory {
+func (kp *DGKernel) GetMemory(arrayName string) *gocca.OCCAMemory {
 	if mem, exists := kp.pooledMemory[arrayName+"_global"]; exists {
 		return mem
 	}
@@ -524,7 +524,7 @@ func (kp *KernelProgram) GetMemory(arrayName string) *gocca.OCCAMemory {
 }
 
 // GetOffsets returns the offset memory handle for an array
-func (kp *KernelProgram) GetOffsets(arrayName string) *gocca.OCCAMemory {
+func (kp *DGKernel) GetOffsets(arrayName string) *gocca.OCCAMemory {
 	if mem, exists := kp.pooledMemory[arrayName+"_offsets"]; exists {
 		return mem
 	}
@@ -532,20 +532,20 @@ func (kp *KernelProgram) GetOffsets(arrayName string) *gocca.OCCAMemory {
 }
 
 // GetArrayMetadata returns metadata for a named array
-func (kp *KernelProgram) GetArrayMetadata(arrayName string) (arrayMetadata, bool) {
+func (kp *DGKernel) GetArrayMetadata(arrayName string) (arrayMetadata, bool) {
 	meta, exists := kp.arrayMetadata[arrayName]
 	return meta, exists
 }
 
 // GetAllocatedArrays returns list of allocated array names
-func (kp *KernelProgram) GetAllocatedArrays() []string {
+func (kp *DGKernel) GetAllocatedArrays() []string {
 	result := make([]string, len(kp.allocatedArrays))
 	copy(result, kp.allocatedArrays)
 	return result
 }
 
 // GetArrayType returns the data type of an allocated array
-func (kp *KernelProgram) GetArrayType(name string) (DataType, error) {
+func (kp *DGKernel) GetArrayType(name string) (DataType, error) {
 	metadata, exists := kp.arrayMetadata[name]
 	if !exists {
 		return 0, fmt.Errorf("array %s not found", name)
@@ -554,7 +554,7 @@ func (kp *KernelProgram) GetArrayType(name string) (DataType, error) {
 }
 
 // GetArrayLogicalSize returns the number of logical elements in an array
-func (kp *KernelProgram) GetArrayLogicalSize(name string) (int, error) {
+func (kp *DGKernel) GetArrayLogicalSize(name string) (int, error) {
 	metadata, exists := kp.arrayMetadata[name]
 	if !exists {
 		return 0, fmt.Errorf("array %s not found", name)
@@ -575,7 +575,7 @@ func (kp *KernelProgram) GetArrayLogicalSize(name string) (int, error) {
 }
 
 // GetIntSize returns the size of int type in bytes
-func (kp *KernelProgram) GetIntSize() int {
+func (kp *DGKernel) GetIntSize() int {
 	if kp.IntType == INT32 {
 		return 4
 	}
@@ -583,7 +583,7 @@ func (kp *KernelProgram) GetIntSize() int {
 }
 
 // CopyArrayToHost copies array data from device to host, removing alignment padding
-func CopyArrayToHost[T any](kp *KernelProgram, name string) ([]T, error) {
+func CopyArrayToHost[T any](kp *DGKernel, name string) ([]T, error) {
 	// Check if array exists
 	metadata, exists := kp.arrayMetadata[name]
 	if !exists {
@@ -655,7 +655,7 @@ func CopyArrayToHost[T any](kp *KernelProgram, name string) ([]T, error) {
 }
 
 // CopyPartitionToHost copies a single partition's data from device to host
-func CopyPartitionToHost[T any](kp *KernelProgram, name string, partitionID int) ([]T, error) {
+func CopyPartitionToHost[T any](kp *DGKernel, name string, partitionID int) ([]T, error) {
 	if partitionID < 0 || partitionID >= kp.NumPartitions {
 		return nil, fmt.Errorf("invalid partition ID: %d (must be 0-%d)", partitionID, kp.NumPartitions-1)
 	}

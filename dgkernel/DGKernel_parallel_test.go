@@ -1,4 +1,4 @@
-package kernel_program
+package dgkernel
 
 import (
 	"bufio"
@@ -17,7 +17,7 @@ import (
 )
 
 // ============================================================================
-// Performance Test Suite for OCCA KernelProgram
+// Performance Test Suite for OCCA DGKernel
 // Focused on meaningful performance phenomena with realistic problem sizes
 //
 // CUDA CONSTRAINT: All K values must be <= 1024 due to @inner thread limit
@@ -119,7 +119,7 @@ func runMatmulBenchmark(b *testing.B, device *gocca.OCCADevice, K []int, np int,
 	totalNodes := totalElements * np
 
 	// Create kernel program
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:         K,
 		FloatType: Float64,
 	})

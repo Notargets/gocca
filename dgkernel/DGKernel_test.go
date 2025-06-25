@@ -1,4 +1,4 @@
-package kernel_program
+package dgkernel
 
 import (
 	"fmt"
@@ -15,7 +15,7 @@ import (
 // ============================================================================
 
 // Test 1.1: Device validation
-func TestKernelProgram_Creation_RequiresValidDevice(t *testing.T) {
+func TestDGKernel(t *testing.T) {
 	// Test nil device
 	t.Run("NilDevice", func(t *testing.T) {
 		defer func() {
@@ -23,7 +23,7 @@ func TestKernelProgram_Creation_RequiresValidDevice(t *testing.T) {
 				t.Error("Expected panic for nil device")
 			}
 		}()
-		NewKernelProgram(nil, Config{K: []int{10}})
+		NewDGKernel(nil, Config{K: []int{10}})
 	})
 
 	// Test empty K array
@@ -36,16 +36,16 @@ func TestKernelProgram_Creation_RequiresValidDevice(t *testing.T) {
 				t.Error("Expected panic for empty K array")
 			}
 		}()
-		NewKernelProgram(device, Config{K: []int{}})
+		NewDGKernel(device, Config{K: []int{}})
 	})
 }
 
 // Test 1.2: Single partition creation
-func TestKernelProgram_Creation_SinglePartition(t *testing.T) {
+func TestDGKernel_Creation_SinglePartition(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:         []int{100},
 		FloatType: Float64,
 		IntType:   INT64,
@@ -65,7 +65,7 @@ func TestKernelProgram_Creation_SinglePartition(t *testing.T) {
 }
 
 // Test 1.3: KpartMax computation with multiple partitions
-func TestKernelProgram_Creation_KpartMaxComputation(t *testing.T) {
+func TestDGKernel_Creation_KpartMaxComputation(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
@@ -83,7 +83,7 @@ func TestKernelProgram_Creation_KpartMaxComputation(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			kp := NewKernelProgram(device, Config{K: tc.k})
+			kp := NewDGKernel(device, Config{K: tc.k})
 			defer kp.Free()
 
 			if kp.KpartMax != tc.expectedKMax {
@@ -99,11 +99,11 @@ func TestKernelProgram_Creation_KpartMaxComputation(t *testing.T) {
 // ============================================================================
 
 // Test 2.1: Type definitions and constants generation
-func TestKernelProgram_CodeGen_TypesAndConstants(t *testing.T) {
+func TestDGKernel_CodeGen_TypesAndConstants(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:         []int{5, 10, 7},
 		FloatType: Float64,
 		IntType:   INT64,
@@ -136,11 +136,11 @@ func TestKernelProgram_CodeGen_TypesAndConstants(t *testing.T) {
 }
 
 // Test 2.2: Matrix macro generation with @inner loop
-func TestKernelProgram_CodeGen_MatrixMacroStructure(t *testing.T) {
+func TestDGKernel_CodeGen_MatrixMacroStructure(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{K: []int{10, 20}})
+	kp := NewDGKernel(device, Config{K: []int{10, 20}})
 	defer kp.Free()
 
 	// Add a differentiation matrix
@@ -179,11 +179,11 @@ func TestKernelProgram_CodeGen_MatrixMacroStructure(t *testing.T) {
 // ============================================================================
 
 // Test 3.1: Single array allocation
-func TestKernelProgram_Memory_SingleArrayAllocation(t *testing.T) {
+func TestDGKernel_Memory_SingleArrayAllocation(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{K: []int{10}})
+	kp := NewDGKernel(device, Config{K: []int{10}})
 	defer kp.Free()
 
 	spec := ArraySpec{
@@ -218,14 +218,14 @@ func TestKernelProgram_Memory_SingleArrayAllocation(t *testing.T) {
 }
 
 // Test 3.2: Multiple array allocation
-func TestKernelProgram_Memory_MultipleArrayAllocation(t *testing.T) {
+func TestDGKernel_Memory_MultipleArrayAllocation(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
 	k := []int{10, 15, 20}
 	totalElements := 45
 
-	kp := NewKernelProgram(device, Config{K: k})
+	kp := NewDGKernel(device, Config{K: k})
 	defer kp.Free()
 
 	specs := []ArraySpec{
@@ -263,11 +263,11 @@ func TestKernelProgram_Memory_MultipleArrayAllocation(t *testing.T) {
 // ============================================================================
 
 // Test 4.1: Basic kernel build and execution
-func TestKernelProgram_Execution_BasicKernel(t *testing.T) {
+func TestDGKernel_Execution_BasicKernel(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{K: []int{10}})
+	kp := NewDGKernel(device, Config{K: []int{10}})
 	defer kp.Free()
 
 	// Allocate simple array
@@ -321,7 +321,7 @@ func TestKernelProgram_Execution_BasicKernel(t *testing.T) {
 }
 
 // Test 4.2: Kernel execution with matrix operation
-func TestKernelProgram_Execution_MatrixOperation(t *testing.T) {
+func TestDGKernel_Execution_MatrixOperation(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
@@ -329,7 +329,7 @@ func TestKernelProgram_Execution_MatrixOperation(t *testing.T) {
 	k := []int{5, 10}
 	totalNodes := 15 * np
 
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:         k,
 		FloatType: Float64,
 	})
@@ -409,7 +409,7 @@ func TestKernelProgram_Execution_MatrixOperation(t *testing.T) {
 }
 
 // Test 4.3: Kernel execution with identity matrix
-func TestKernelProgram_Execution_IdentityMatrix(t *testing.T) {
+func TestDGKernel_Execution_IdentityMatrix(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
@@ -417,7 +417,7 @@ func TestKernelProgram_Execution_IdentityMatrix(t *testing.T) {
 	k := []int{2, 3}
 	totalNodes := 5 * np
 
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:         k,
 		FloatType: Float64,
 	})
@@ -502,7 +502,7 @@ func TestKernelProgram_Execution_IdentityMatrix(t *testing.T) {
 // ============================================================================
 
 // Test 5.1: Systematic partition count increase
-func TestKernelProgram_Incremental_PartitionScaling(t *testing.T) {
+func TestDGKernel_Incremental_PartitionScaling(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
@@ -515,7 +515,7 @@ func TestKernelProgram_Incremental_PartitionScaling(t *testing.T) {
 				k[i] = 10 + i*5 // Variable sizes: 10, 15, 20, ...
 			}
 
-			kp := NewKernelProgram(device, Config{K: k})
+			kp := NewDGKernel(device, Config{K: k})
 			defer kp.Free()
 
 			// Verify KpartMax is correct
@@ -550,7 +550,7 @@ func TestKernelProgram_Incremental_PartitionScaling(t *testing.T) {
 // ============================================================================
 
 // Test 6.1: Degenerate partition configurations
-func TestKernelProgram_EdgeCases_DegeneratePartitions(t *testing.T) {
+func TestDGKernel_EdgeCases_DegeneratePartitions(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
@@ -566,7 +566,7 @@ func TestKernelProgram_EdgeCases_DegeneratePartitions(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			kp := NewKernelProgram(device, Config{K: tc.k})
+			kp := NewDGKernel(device, Config{K: tc.k})
 			defer kp.Free()
 
 			if kp.KpartMax != tc.expectedKMax {
@@ -589,14 +589,14 @@ func TestKernelProgram_EdgeCases_DegeneratePartitions(t *testing.T) {
 // ============================================================================
 
 // Test 7.1: Offset calculations preserve total size
-func TestKernelProgram_MathProperties_OffsetCalculations(t *testing.T) {
+func TestDGKernel_MathProperties_OffsetCalculations(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
 	k := []int{10, 15, 20}
 	totalElements := 45
 
-	kp := NewKernelProgram(device, Config{K: k})
+	kp := NewDGKernel(device, Config{K: k})
 	defer kp.Free()
 
 	spec := ArraySpec{

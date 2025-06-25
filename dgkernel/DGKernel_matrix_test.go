@@ -1,4 +1,4 @@
-package kernel_program
+package dgkernel
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 )
 
 // Test proper matrix multiplication with known results
-func TestKernelProgram_MatrixMultiplication_KnownAnswer(t *testing.T) {
+func TestDGKernel_MatrixMultiplication_KnownAnswer(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
@@ -18,7 +18,7 @@ func TestKernelProgram_MatrixMultiplication_KnownAnswer(t *testing.T) {
 	totalElements := 5
 	totalNodes := totalElements * np
 
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:         k,
 		FloatType: Float64,
 	})
@@ -110,7 +110,7 @@ func TestKernelProgram_MatrixMultiplication_KnownAnswer(t *testing.T) {
 }
 
 // Test strided array layout for face data
-func TestKernelProgram_StridedFaceArray(t *testing.T) {
+func TestDGKernel_StridedFaceArray(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
@@ -123,7 +123,7 @@ func TestKernelProgram_StridedFaceArray(t *testing.T) {
 	faceNodesPerElement := Npface * Nfaces
 	totalFaceNodes := Kmax * faceNodesPerElement
 
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:         []int{Kmax},
 		FloatType: Float64,
 	})
@@ -251,7 +251,7 @@ func TestKernelProgram_StridedFaceArray(t *testing.T) {
 }
 
 // Test multiple arrays passed to kernel with matrix operations
-func TestKernelProgram_MultipleArraysWithMatMul(t *testing.T) {
+func TestDGKernel_MultipleArraysWithMatMul(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
@@ -260,7 +260,7 @@ func TestKernelProgram_MultipleArraysWithMatMul(t *testing.T) {
 	totalElements := 5
 	totalNodes := totalElements * np
 
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:         k,
 		FloatType: Float64,
 	})

@@ -5,7 +5,7 @@ gocca:
 test:
 	#. ~/.bashrc && go test -parallel=1 -cover ./...
 	go test -cover -coverpkg=github.com/notargets/gocca ./gocca_test
-	go test -cover ./halo ./kernel_program
+	go test -cover ./halo ./dgkernel
 
 bench:
 	#go test -bench=. -run=^$ -parallel=1 -benchtime=1x ./...

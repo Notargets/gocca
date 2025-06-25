@@ -1,4 +1,4 @@
-package kernel_program
+package dgkernel
 
 import (
 	"fmt"
@@ -17,7 +17,7 @@ func TestGetArrayType_BasicFunctionality(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:         []int{10},
 		FloatType: Float64,
 		IntType:   INT32,
@@ -66,7 +66,7 @@ func TestGetArrayType_ErrorCases(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{K: []int{10}})
+	kp := NewDGKernel(device, Config{K: []int{10}})
 	defer kp.Free()
 
 	// Test non-existent array
@@ -81,7 +81,7 @@ func TestGetArrayLogicalSize_BasicFunctionality(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{K: []int{10}})
+	kp := NewDGKernel(device, Config{K: []int{10}})
 	defer kp.Free()
 
 	// Test arrays of different sizes
@@ -146,7 +146,7 @@ func TestGetArrayLogicalSize_MultiplePartitions(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			kp := NewKernelProgram(device, Config{K: tc.k})
+			kp := NewDGKernel(device, Config{K: tc.k})
 			defer kp.Free()
 
 			totalK := 0
@@ -185,7 +185,7 @@ func TestCopyArrayToHost_SinglePartition(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:         []int{5},
 		FloatType: Float64,
 	})
@@ -236,7 +236,7 @@ func TestCopyArrayToHost_TypeVerification(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{K: []int{10}})
+	kp := NewDGKernel(device, Config{K: []int{10}})
 	defer kp.Free()
 
 	// Allocate Float64 array
@@ -275,7 +275,7 @@ func TestCopyArrayToHost_AllTypes(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{K: []int{5}})
+	kp := NewDGKernel(device, Config{K: []int{5}})
 	defer kp.Free()
 
 	// Test all data types
@@ -357,7 +357,7 @@ func TestCopyArrayToHost_PaddingRemoval(t *testing.T) {
 	k := []int{3, 5, 7}
 	totalElements := 15
 
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:         k,
 		FloatType: Float64,
 	})
@@ -433,7 +433,7 @@ func TestCopyPartitionToHost_SinglePartition(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{K: []int{5}})
+	kp := NewDGKernel(device, Config{K: []int{5}})
 	defer kp.Free()
 
 	spec := ArraySpec{
@@ -476,7 +476,7 @@ func TestCopyPartitionToHost_MultiplePartitions(t *testing.T) {
 	defer device.Free()
 
 	k := []int{3, 4, 5}
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:         k,
 		FloatType: Float64,
 	})
@@ -538,7 +538,7 @@ func TestCopyPartitionToHost_WithAlignment(t *testing.T) {
 	defer device.Free()
 
 	k := []int{3, 5, 7} // Odd sizes to test padding
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:         k,
 		FloatType: Float64,
 	})
@@ -614,7 +614,7 @@ func TestCopyPartitionToHost_InvalidPartitionID(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{K: []int{5, 10}})
+	kp := NewDGKernel(device, Config{K: []int{5, 10}})
 	defer kp.Free()
 
 	spec := ArraySpec{
@@ -653,7 +653,7 @@ func TestCopyMethods_DegenerateCases(t *testing.T) {
 	defer device.Free()
 
 	// Empty partition (K[i] = 0)
-	kp := NewKernelProgram(device, Config{K: []int{0, 5, 0}})
+	kp := NewDGKernel(device, Config{K: []int{0, 5, 0}})
 	defer kp.Free()
 
 	totalElements := 5
@@ -697,7 +697,7 @@ func TestCopyMethods_Int32Offsets(t *testing.T) {
 	device := createTestDevice()
 	defer device.Free()
 
-	kp := NewKernelProgram(device, Config{
+	kp := NewDGKernel(device, Config{
 		K:       []int{100, 200, 150},
 		IntType: INT32, // Force 32-bit offsets
 	})

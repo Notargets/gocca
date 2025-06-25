@@ -1,8 +1,8 @@
-# KernelProgram Design Document
+# DGKernel Design Document
 
 ## Overview
 
-The KernelProgram system provides infrastructure for managing GPU/accelerator
+The DGKernel system provides infrastructure for managing GPU/accelerator
 kernels with partition-parallel execution. It handles memory allocation, kernel
 compilation, and code generation to simplify writing high-performance parallel
 kernels. The system is designed as a general-purpose tool that users configure
@@ -27,7 +27,7 @@ for their specific computational needs.
 
 ### @outer/@inner Loop Strategy
 
-KernelProgram uses a two-level parallelism model:
+DGKernel uses a two-level parallelism model:
 
 - **@outer loop**: Iterates over partitions (coarse-grained parallelism)
 - **@inner loop**: Iterates over elements within each partition (fine-grained
@@ -69,7 +69,7 @@ for (int part = 0; part < NPART; ++part; @outer) {
 ## Core Structure
 
 ```go
-type KernelProgram struct {
+type DGKernel struct {
     // Partition configuration
     NumPartitions int
     K []int // Variable elements per partition
@@ -93,7 +93,7 @@ type KernelProgram struct {
 }
 ```
 
-During initialization, KernelProgram computes KpartMax = max(K) and embeds it as
+During initialization, DGKernel computes KpartMax = max(K) and embeds it as
 a compile-time constant in the kernel preamble.
 
 ## Memory Management
@@ -138,7 +138,7 @@ Kernels must follow the @outer/@inner pattern with element bounds checking:
 
 ### Generated Preamble
 
-KernelProgram generates the preamble with all necessary constants, including
+DGKernel generates the preamble with all necessary constants, including
 KpartMax which is computed from the K array during initialization:
 
 ```c
@@ -236,11 +236,11 @@ Key features:
 
 ```go
 // Create kernel program
-kp := NewKernelProgram(device, Config{
+kp := NewDGKernel(device, Config{
     K: []int{100, 150, 80}, // Variable partition sizes
     FloatType: Float64,
 })
-// KernelProgram automatically computes KpartMax = 150 from K array
+// DGKernel automatically computes KpartMax = 150 from K array
 
 // Add matrices - dimensions determine stride behavior
 kp.AddStaticMatrix("Dr", differentiationMatrix)    // 20×20: stride 20
