@@ -115,11 +115,16 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
          dgKernel.ExecuteStage("rkStage",
             rk4a[INTRK],    // coefficient for residual
             rk4b[INTRK]*dt) // coefficient for RHS
-      }
 
-      // Face exchange for next timestep (if using MPI/multi-GPU)
-      if useParallelExchange {
+         // Face exchange is ALWAYS needed to connect elements
+         // This handles both local (within partition) and remote (between partition) faces
          dgKernel.ExecuteStage("faceExchange")
+
+         // Optional: MPI communication for multi-process runs
+         if useMPI {
+            // Exchange ghost face data between MPI ranks
+            mpiExchangeFaceData(dgKernel)
+         }
       }
 
       // Update time
@@ -353,13 +358,8 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
                     uM[i] = u_elem[vid];
                 }
                 
-                // Get neighbor values (simple free boundary)
-                real_t uP[NFP_TET*4];
-                int_t* vmapP_elem = vmapP_PART(part) + elem*NFP_TET*4;
-                for (int i = 0; i < NFP_TET*4; ++i) {
-                    int idP = vmapP_elem[i];
-                    uP[i] = (idP < totalFaceNodes) ? uM_global[idP] : uM[i];
-                }
+                // Get neighbor values via face exchange
+                real_t* uP_elem = uP_PART(part) + elem*NFP_TET*4;
                 
                 // Surface contribution
                 real_t* nx_elem = nx_PART(part) + elem*NFP_TET*4;
@@ -368,7 +368,7 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
                 real_t* Fscale_elem = Fscale_PART(part) + elem*NFP_TET*4;
                 real_t surfaceRHS[NP_TET];
                 
-                SurfaceIntegral_TET(uM, uP, nx_elem, ny_elem, nz_elem, 
+                SurfaceIntegral_TET(uM, uP_elem, nx_elem, ny_elem, nz_elem, 
                                   Fscale_elem, surfaceRHS);
                 
                 // Update solution: u = a*u + resu + b_dt*rhs
@@ -384,21 +384,34 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
             }`,
         })
     
-    // Stage 3: Face exchange (only if using parallel communication)
+    // Stage 3: Face exchange - REQUIRED for DG connectivity
     builder.AddStage("faceExchange",
         kernel_program.StageSpec{
-            Inputs:  []string{"u", "faceMap"},
-            Outputs: []string{"uFaceBuffer"},
+            Inputs:  []string{"u", "vmapP"},
+            Outputs: []string{"uP"},
             Source: `
-            // Extract face values for MPI/GPU exchange
+            // Exchange face values between elements
+            // This is essential for DG - it connects elements through their faces
+            
             for (int elem = 0; elem < K[part]; ++elem; @inner) {
-                for (int face = 0; face < 4; ++face) {
-                    if (isExternalFace[elem*4 + face]) {
-                        // Copy face data to exchange buffer
-                        for (int n = 0; n < NFP_TET; ++n) {
-                            int lid = elem*NP_TET + fmask[face][n];
-                            int gid = faceMap[elem*4*NFP_TET + face*NFP_TET + n];
-                            uFaceBuffer[gid] = u[lid];
+                // For each face of this element
+                for (int f = 0; f < 4; ++f) {
+                    for (int n = 0; n < NFP_TET; ++n) {
+                        int i = f*NFP_TET + n;
+                        int_t* vmapP_elem = vmapP_PART(part) + elem*NFP_TET*4;
+                        
+                        // vmapP tells us where to find the neighbor's face value
+                        int idP = vmapP_elem[i];
+                        
+                        if (idP < totalFaceNodes) {
+                            // Interior face: get value from neighbor element
+                            // This might be in same partition (local) or different partition
+                            uP_PART(part)[elem*NFP_TET*4 + i] = u_global[idP];
+                        } else {
+                            // Boundary face: apply boundary condition
+                            // For free boundary: uP = uM
+                            int vid = vmapM_PART(part)[elem*NFP_TET*4 + i] % NP_TET;
+                            uP_PART(part)[elem*NFP_TET*4 + i] = u_PART(part)[elem*NP_TET + vid];
                         }
                     }
                 }
@@ -434,6 +447,9 @@ func allocateArrays(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) e
             {Name: "uy", Size: K * Np * 8},
             {Name: "uz", Size: K * Np * 8},
             {Name: "divu", Size: K * Np * 8},
+            
+            // Face data
+            {Name: "uP", Size: K * Nfp * 4 * 8},  // Neighbor face values
             
             // Geometric factors (per element)
             {Name: "rx", Size: K * Np * 8},
@@ -660,19 +676,21 @@ This example demonstrates a realistic DG implementation using DGKernelV2:
 1. **Realistic Algorithm Flow**:
    - Initialize once
    - Calculate timestep (constant or adaptive)
-   - Time loop with RK stages and face exchange
+   - Time loop with RK stages
+   - **Face exchange after EVERY RK stage** (essential for DG connectivity)
+   - Optional MPI communication for multi-process runs
    - Periodic output and checkpointing
 
-2. **Simplified Design**:
-   - Only meaningful operators (gradient, divergence, surface integral)
-   - Combined RK stage (compute and update together)
-   - Face extraction done inline, not as operator
+2. **Stage Separation Rationale**:
+   - `rkStage`: Computes RHS using current face values and updates solution
+   - `faceExchange`: Updates face connectivity data (uP) from newly computed solution
+   - This separation is REQUIRED because face exchange needs the updated solution from ALL elements before it can execute
 
 3. **Key Benefits of DGKernelV2**:
    - Automatic workspace management
    - Static matrix embedding
    - Clean operator abstraction for complex operations
    - Automatic parameter marshaling
-   - Stage-based execution management
+   - Stage-based execution management that respects algorithmic dependencies
 
-The design focuses on what makes DGKernelV2 valuable: managing the complexity of DG kernels while keeping the high-level algorithm clear and maintainable.
+The face exchange stage is fundamental to DG methods - it's what connects the discontinuous elements together through their shared faces. Without it, each element would evolve independently with no coupling to its neighbors.
