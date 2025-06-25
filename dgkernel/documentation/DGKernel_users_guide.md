@@ -1,4 +1,4 @@
-# KernelProgram User's Guide
+# DGKernel User's Guide
 
 ## Table of Contents
 1. [Introduction](#introduction)
@@ -14,7 +14,7 @@
 
 ## Introduction
 
-KernelProgram is a high-level abstraction in gocca that simplifies writing partition-parallel kernels for scientific computing. It provides:
+DGKernel is a high-level abstraction in gocca that simplifies writing partition-parallel kernels for scientific computing. It provides:
 
 - **Automatic memory management** with alignment support
 - **Partition-parallel execution** for domain decomposition
@@ -22,7 +22,7 @@ KernelProgram is a high-level abstraction in gocca that simplifies writing parti
 - **Static data embedding** for optimal matrix operations
 - **Backend portability** across CPU, GPU, and other accelerators
 
-### Why Use KernelProgram?
+### Why Use DGKernel?
 
 Writing efficient parallel kernels typically requires:
 - Manual offset calculations for partitioned data
@@ -30,15 +30,15 @@ Writing efficient parallel kernels typically requires:
 - Careful management of kernel parameters
 - Repetitive boilerplate code
 
-KernelProgram eliminates this complexity, letting you focus on your algorithm.
+DGKernel eliminates this complexity, letting you focus on your algorithm.
 
-## KernelProgram API Methods
+## DGKernel API Methods
 
 ### Core Methods
 
-**NewKernelProgram** - Create a new KernelProgram instance
+**NewDGKernel** - Create a new DGKernel instance
 ```go
-kp := gocca.NewKernelProgram(device, gocca.Config{
+kp := gocca.NewDGKernel(device, gocca.Config{
     K:         []int{100, 150, 120},  // Partition sizes
     FloatType: gocca.Float64,         // or Float32
     IntType:   gocca.Int64,           // or Int32
@@ -103,7 +103,7 @@ partData, err := gocca.CopyPartitionToHost[float64](kp, "arrayName", partitionID
 
 ### Partitions and Variable K
 
-KernelProgram uses a partition-parallel execution model where work is divided into partitions that can have **variable sizes**:
+DGKernel uses a partition-parallel execution model where work is divided into partitions that can have **variable sizes**:
 
 ```go
 // Example: 4 partitions with different element counts
@@ -126,7 +126,7 @@ Partition 2: [elem_0, elem_1, ..., elem_119]
 Partition 3: [elem_0, elem_1, ..., elem_94]
 ```
 
-KernelProgram automatically generates offset arrays and access macros for clean kernel code.
+DGKernel automatically generates offset arrays and access macros for clean kernel code.
 
 ## Getting Started
 
@@ -146,8 +146,8 @@ device, err := gocca.NewDevice(`{
 // Define partition sizes (variable K)
 partitionSizes := []int{1000, 1200, 800, 1100}
 
-// Create KernelProgram
-kp := gocca.NewKernelProgram(device, gocca.Config{
+// Create DGKernel
+kp := gocca.NewDGKernel(device, gocca.Config{
     K:         partitionSizes,
     FloatType: gocca.Float64,
     IntType:   gocca.Int64,
@@ -157,7 +157,7 @@ defer kp.Free()
 
 ### Supported Backends
 
-KernelProgram works with all OCCA backends:
+DGKernel works with all OCCA backends:
 - **Serial**: Debugging with standard tools
 - **OpenMP**: Multi-core CPU parallelism
 - **CUDA**: NVIDIA GPU acceleration
@@ -212,7 +212,7 @@ const (
 
 ### Generated Access Patterns
 
-For each array, KernelProgram generates:
+For each array, DGKernel generates:
 - `arrayName_global`: Global memory pointer
 - `arrayName_offsets`: Per-partition offset array
 - `arrayName_PART(p)`: Macro to access partition p's data
@@ -235,7 +235,7 @@ kp.AddStaticMatrix("M", M)
 
 ### Generated Matrix Macros
 
-KernelProgram generates vectorizable macros for matrix operations:
+DGKernel generates vectorizable macros for matrix operations:
 
 ```c
 // Generated macro for square matrix multiplication
@@ -355,7 +355,7 @@ if err != nil {
 ### Running Kernels
 
 ```go
-// Simple execution - KernelProgram handles parameter expansion
+// Simple execution - DGKernel handles parameter expansion
 err = kp.RunKernel("volumeKernel", "U", "RHS")
 
 // The above automatically expands to pass:
@@ -454,7 +454,7 @@ import (
 func main() {
     // Setup
     device, _ := gocca.NewDevice(`{"mode": "CUDA", "device_id": 0}`)
-    kp := gocca.NewKernelProgram(device, gocca.Config{
+    kp := gocca.NewDGKernel(device, gocca.Config{
         K: []int{1000, 1200, 800},  // 3 partitions
     })
     defer kp.Free()
@@ -554,7 +554,7 @@ kernelSource := `
 ### Example 3: Using Multiple Arrays
 
 ```go
-// Example showing KernelProgram's automatic parameter handling
+// Example showing DGKernel's automatic parameter handling
 kernelSource := `
 @kernel void processMultipleArrays(
     const int_t* K,
@@ -564,7 +564,7 @@ kernelSource := `
     real_t* RHS_global, const int_t* RHS_offsets
 ) {
     for (int part = 0; part < NPART; ++part; @outer) {
-        // KernelProgram's macros give clean partition access
+        // DGKernel's macros give clean partition access
         const real_t* U = U_PART(part);
         const real_t* V = V_PART(part);
         const real_t* J = J_PART(part);
@@ -578,7 +578,7 @@ kernelSource := `
 }
 `
 
-// KernelProgram handles all the parameter expansion
+// DGKernel handles all the parameter expansion
 err := kp.RunKernel("processMultipleArrays", "U", "V", "J", "RHS")
 // This automatically passes: K, U_global, U_offsets, V_global, V_offsets, etc.
 ```
@@ -615,6 +615,6 @@ err := kp.RunKernel("processMultipleArrays", "U", "V", "J", "RHS")
 
 ## Conclusion
 
-KernelProgram provides a powerful abstraction for scientific computing with gocca. By handling memory management, code generation, and execution details, it lets you focus on implementing your algorithms efficiently across different architectures.
+DGKernel provides a powerful abstraction for scientific computing with gocca. By handling memory management, code generation, and execution details, it lets you focus on implementing your algorithms efficiently across different architectures.
 
 For more examples and advanced usage, see the gocca repository and test files.
