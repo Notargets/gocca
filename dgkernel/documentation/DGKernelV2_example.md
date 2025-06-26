@@ -1,6 +1,6 @@
 # DGKernelV2 Example: 3D Scalar Burgers Equation
 
-This example demonstrates building a simple 3D Burgers equation solver using DGKernelV2's operator approach.
+This example demonstrates building a 3D Burgers equation solver using DGKernelV2 with the face buffer design pattern.
 
 ## Main Driver Function
 
@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math"
 	"github.com/notargets/gocfd/DG3D"
+	"github.com/notargets/gocfd/DG3D/face_buffer"
 	"github.com/notargets/gocca"
 	"github.com/notargets/gocca/kernel_program"
 )
@@ -25,6 +26,19 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 		return err
 	}
 	defer device.Free()
+
+	// Build face buffer (Phase 1: connectivity)
+	fb, err := facebuffer.BuildFaceBuffer(el)
+	if err != nil {
+		return fmt.Errorf("failed to build face buffer: %v", err)
+	}
+
+	// Apply boundary conditions (Phase 2: BC overlay)
+	bcData := extractBCData(el) // Extract BC info from mesh
+	err = fb.ApplyBoundaryConditions(bcData)
+	if err != nil {
+		return fmt.Errorf("failed to apply BC overlay: %v", err)
+	}
 
 	// Create DGKernel instance
 	dgKernel := kernel_program.NewDGKernel(device, kernel_program.Config{
@@ -42,7 +56,12 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 			ComputeStrides: func(tags kernel_program.Tags) map[string]int {
 				Np := el.Np
 				Nfp := el.Nfp
-				return map[string]int{"NP": Np, "NFP": Nfp}
+				Nfaces := 4
+				return map[string]int{
+					"NP": Np,
+					"NFP": Nfp,
+					"NFACES": Nfaces,
+				}
 			},
 		},
 		"Dr", el.Dr, "Ds", el.Ds, "Dt", el.Dt, "LIFT", el.LIFT)
@@ -88,13 +107,13 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 		return fmt.Errorf("validation failed: %v", err)
 	}
 
-	if err := buildKernels(builder, el); err != nil {
+	if err := buildKernels(builder, el, fb); err != nil {
 		return err
 	}
 
 	// 4. Allocate arrays and initialize
-	allocateArrays(dgKernel, el)
-	copyMeshData(dgKernel, el)
+	allocateArrays(dgKernel, el, fb)
+	copyMeshData(dgKernel, el, fb)
 	dgKernel.ExecuteStage("initialize")
 
 	// 5. Time stepping
@@ -110,53 +129,50 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 	fmt.Printf("Starting time integration: dt=%f, steps=%d\n", dt, Nsteps)
 
 	for step := 0; step < Nsteps; step++ {
+		// Exchange face values for this time step
+		dgKernel.ExecuteStage("exchangeFaceValues")
+
+		// Note: For multi-machine partitions, MPI exchange would occur here
+		// Current implementation uses shared memory copy between device partitions
+
 		for INTRK := 0; INTRK < 5; INTRK++ {
-			// Ghost exchange for remote faces (if multi-partition)
-			if hasRemoteFaces {
-				dgKernel.ExecuteStage("ghostExchange")
-				mpiExchangeGhostData()  // Host-side MPI
-			}
-
-			// Compute face fluxes (P values fetched directly via indices)
-			dgKernel.ExecuteStage("faceCompute")
-
-			// Compute RHS and update solution
+			// Compute RHS including face fluxes and update solution
 			dgKernel.ExecuteStage("computeRHS", rk4a[INTRK], rk4b[INTRK]*dt)
+		}
+
+		if step % 100 == 0 {
+			fmt.Printf("Step %d/%d\n", step, Nsteps)
 		}
 	}
 
-	if step % 100 == 0 {
-		fmt.Printf("Step %d/%d\n", step, Nsteps)
-	}
-}
+	// 6. Output
+	solution, _ := dgKernel.CopyArrayToHost("u")
+	fmt.Printf("Complete. Solution norm: %f\n", norm(solution))
 
-// 6. Output
-solution, _ := dgKernel.CopyArrayToHost("u")
-fmt.Printf("Complete. Solution norm: %f\n", norm(solution))
-
-return nil
+	return nil
 }
 ```
 
 ## Kernel Building
 
 ```go
-func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) error {
-    // Persistent arrays
-    builder.SetPersistentArrays(
-        kernel_program.PersistentArrays{
-            Solution: []string{"u", "resu"},
-            Geometry: []string{"rx", "ry", "rz", "sx", "sy", "sz", 
-                              "tx", "ty", "tz", "nx", "ny", "nz", "Fscale"},
-            Connectivity: []string{"vmapM", "vmapP"},
-        })
-    
-    // Stage 1: Initialize
-    builder.AddStage("initialize",
-        kernel_program.StageSpec{
-            Inputs:  []string{"x", "y", "z"},
-            Outputs: []string{"u"},
-            Source: `
+func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D, fb *facebuffer.FaceBuffer) error {
+// Persistent arrays
+builder.SetPersistentArrays(
+kernel_program.PersistentArrays{
+Solution: []string{"u", "resu"},
+Geometry: []string{"rx", "ry", "rz", "sx", "sy", "sz",
+"tx", "ty", "tz", "nx", "ny", "nz", "Fscale"},
+Connectivity: []string{"vmapM", "faceIndex"},
+FaceData: []string{"faceValues", "remoteFaceBuffers"},
+})
+
+// Stage 1: Initialize
+builder.AddStage("initialize",
+kernel_program.StageSpec{
+Inputs:  []string{"x", "y", "z"},
+Outputs: []string{"u"},
+Source: `
             for (int elem = 0; elem < K[part]; ++elem; @inner) {
                 for (int n = 0; n < NP_TET; ++n) {
                     int id = elem * NP_TET + n;
@@ -164,78 +180,99 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
                     u[id] = exp(-10.0 * r2);
                 }
             }`,
-        })
-    
-    // Stage 2: Face compute - directly fetch P values using indices
-    builder.AddStage("faceCompute",
-        kernel_program.StageSpec{
-            Inputs:  []string{"u", "nx", "ny", "nz", "Fscale", "vmapM", 
-                             "localPIndices", "faceTypes"},
-            Outputs: []string{"faceFlux"},
-            Source: `
+})
+
+// Stage 2: Exchange face values between partitions
+builder.AddStage("exchangeFaceValues",
+kernel_program.StageSpec{
+Inputs:  []string{"u", "vmapM", "remoteSendIndices"},
+Outputs: []string{"faceValues", "remoteFaceBuffers"},
+Source: `
+            // First, extract all face values to faceValues array
             for (int elem = 0; elem < K[part]; ++elem; @inner) {
-                // For each face point in this element
-                for (int i = 0; i < NFP_TET*4; ++i) {
-                    int faceIdx = elem*NFP_TET*4 + i;
-                    
-                    // Get M value from current element
-                    int vidM = vmapM_PART(part)[faceIdx] % NP_TET;
-                    real_t uM = u_PART(part)[elem*NP_TET + vidM];
-                    
-                    // Get P value based on face type
-                    real_t uP;
-                    int faceType = faceTypes_PART(part)[faceIdx];
-                    
-                    if (faceType == INTERIOR_FACE) {
-                        // Interior face: use localPIndices to find P location
-                        int pIdx = localPIndices_PART(part)[faceIdx];
-                        uP = u_global[pIdx];  // Direct fetch from global array
-                    } else if (faceType == BOUNDARY_FACE) {
-                        // Boundary: apply BC (free boundary in this case)
-                        uP = uM;
-                    } else { // REMOTE_FACE
-                        // Remote face: value will be in ghost buffer after MPI exchange
-                        uP = ghostFaceBuffer_PART(part)[faceIdx];
+                for (int face = 0; face < NFACES_TET; ++face) {
+                    for (int fp = 0; fp < NFP_TET; ++fp) {
+                        int fIdx = elem*NFACES_TET*NFP_TET + face*NFP_TET + fp;
+                        int volIdx = vmapM_PART(part)[fIdx];
+                        faceValues_PART(part)[fIdx] = u_PART(part)[volIdx];
                     }
-                    
-                    // Compute Lax-Friedrichs flux
-                    real_t alpha = fmax(fabs(uM), fabs(uP));
-                    real_t Fn = 0.5 * (uM*uM + uP*uP) / 2.0 + 0.5 * alpha * (uM - uP);
-                    
-                    // Project onto normal and scale
-                    real_t nx_val = nx_PART(part)[faceIdx];
-                    real_t ny_val = ny_PART(part)[faceIdx];
-                    real_t nz_val = nz_PART(part)[faceIdx];
-                    real_t Fscale_val = Fscale_PART(part)[faceIdx];
-                    
-                    faceFlux_PART(part)[faceIdx] = Fn * (nx_val + ny_val + nz_val) * Fscale_val;
                 }
-            }`,
-        })
-    
-    // Stage 3: Compute RHS with gradient operator and face flux
-    builder.AddStage("computeRHS",
-        kernel_program.StageSpec{
-            UsesOperators: []string{"PhysicalGradient_TET"},
-            Parameters: []string{"rk_a", "rk_b_dt"},
-            Source: `
-            const real_t a = rk_a_scalar;
-            const real_t b_dt = rk_b_dt_scalar;
+            }
             
-            // Allocate gradient arrays for the partition
-            real_t ux[NP_TET * K[part]];
-            real_t uy[NP_TET * K[part]];
-            real_t uz[NP_TET * K[part]];
+            // Then pack remote face values for other partitions
+            // Each partition packs what others need from it
+            for (int i = 0; i < numRemoteSends[part]; ++i; @inner) {
+                int fIdx = remoteSendIndices_PART(part)[i];
+                remoteFaceBuffers_PART(part)[i] = faceValues_PART(part)[fIdx];
+            }
             
-            // Apply gradient operator to entire partition
-            PhysicalGradient_TET(u_PART(part), 
-                               rx_PART(part), ry_PART(part), rz_PART(part),
-                               sx_PART(part), sy_PART(part), sz_PART(part),
-                               tx_PART(part), ty_PART(part), tz_PART(part),
-                               ux, uy, uz);
+            // Note: After this kernel, the runtime copies remoteFaceBuffers
+            // between partitions using aligned shared memory transfers.
+            // This happens simultaneously as each buffer is exclusively
+            // accessed by one partition at a time.`,
+})
+
+// Stage 3: Compute RHS with face fluxes inline
+builder.AddStage("computeRHS",
+kernel_program.StageSpec{
+Inputs:  []string{"u", "resu", "rx", "ry", "rz",
+"sx", "sy", "sz", "tx", "ty", "tz",
+"faceValues", "nx", "ny", "nz", "Fscale",
+"faceIndex", "remoteFaceBuffers"},
+Outputs: []string{"u", "resu"},
+Source: `
+            real_t a = $PARAM0;
+            real_t b_dt = $PARAM1;
+            
+            // Compute volume gradients
+            real_t ux[NP_TET*KpartMax], uy[NP_TET*KpartMax], uz[NP_TET*KpartMax];
+            PhysicalGradient(u_PART(part), rx_PART(part), ry_PART(part), rz_PART(part),
+                           sx_PART(part), sy_PART(part), sz_PART(part),
+                           tx_PART(part), ty_PART(part), tz_PART(part),
+                           ux, uy, uz);
+            
+            // Remote face counter
+            int remote_counter = 0;
             
             // Process each element
             for (int elem = 0; elem < K[part]; ++elem; @inner) {
+                // First compute face fluxes for this element
+                real_t elemFaceFlux[NFP_TET * NFACES_TET];
+                
+                for (int face = 0; face < NFACES_TET; ++face) {
+                    int face_code = faceIndex_PART(part)[face + elem*NFACES_TET];
+                    
+                    for (int fp = 0; fp < NFP_TET; ++fp) {
+                        int fIdx = elem*NFACES_TET*NFP_TET + face*NFP_TET + fp;
+                        
+                        // M value from faceValues
+                        real_t uM = faceValues_PART(part)[fIdx];
+                        real_t uP;
+                        
+                        // Get P value based on face type
+                        if (face_code >= 0) {
+                            // Interior face: P from faceValues at offset
+                            uP = faceValues_PART(part)[face_code + fp];
+                        } else if (face_code == -9999) {
+                            // Remote face: P from remote buffer
+                            uP = remoteFaceBuffers_PART(part)[remote_counter++];
+                        } else {
+                            // Boundary face: apply BC
+                            uP = applyBC(uM, -face_code);
+                        }
+                        
+                        // Compute numerical flux (Lax-Friedrichs)
+                        real_t alpha = fmax(fabs(uM), fabs(uP));
+                        real_t flux = 0.5 * (0.5*(uM*uM + uP*uP) - alpha*(uP - uM));
+                        
+                        // Store scaled flux
+                        real_t normalFlux = flux * (nx_PART(part)[fIdx] + 
+                                                   ny_PART(part)[fIdx] + 
+                                                   nz_PART(part)[fIdx]);
+                        elemFaceFlux[face*NFP_TET + fp] = normalFlux * Fscale_PART(part)[fIdx];
+                    }
+                }
+                
                 // Update residual
                 for (int n = 0; n < NP_TET; ++n) {
                     int id = elem * NP_TET + n;
@@ -249,12 +286,9 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
                     rhs[n] = -u_PART(part)[id] * (ux[id] + uy[id] + uz[id]);
                 }
                 
-                // Get precomputed face flux for this element
-                real_t* flux_elem = faceFlux_PART(part) + elem*NFP_TET*4;
-                
                 // Apply LIFT to face flux
                 real_t lifted[NP_TET];
-                MATMUL_LIFT(flux_elem, lifted, 1);
+                MATMUL_LIFT(elemFaceFlux, lifted, 1);
                 
                 // Update solution
                 for (int n = 0; n < NP_TET; ++n) {
@@ -262,40 +296,19 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D) err
                     u_PART(part)[id] = resu_PART(part)[id] + b_dt * (rhs[n] + lifted[n]);
                 }
             }`,
-        })
-    
-    // Stage 4: Ghost exchange for remote faces (if using MPI)
-    builder.AddStage("ghostExchange",
-        kernel_program.StageSpec{
-            Inputs:  []string{"u", "remoteSendIndices"},
-            Outputs: []string{"ghostFaceBuffer"},
-            Source: `
-            // This stage only handles packing data for MPI send
-            // The actual MPI exchange happens between kernel calls
-            
-            // Pack values that need to be sent to other partitions
-            for (int i = 0; i < numRemoteSends; ++i; @inner) {
-                int mIdx = remoteSendIndices[i];
-                int vidM = vmapM_global[mIdx] % NP_TET;
-                int elem = mIdx / (NFP_TET * 4);
-                
-                sendBuffer[i] = u_global[elem*NP_TET + vidM];
-            }
-            
-            // After this kernel, host code does MPI exchange
-            // Then unpacks received values into ghostFaceBuffer`,
-        })
-    
-    return builder.Build()
+})
+
+return builder.Build()
 }
 ```
 
 ## Helper Functions
 
 ```go
-func allocateArrays(dgKernel *kernel_program.DGKernel, el *DG3D.Element3D) {
+func allocateArrays(dgKernel *kernel_program.DGKernel, el *DG3D.Element3D, fb *facebuffer.FaceBuffer) {
 Np := el.Np
 Nfp := el.Nfp
+Nfaces := 4
 K := el.K
 
 // Volume arrays: K*Np elements
@@ -305,34 +318,54 @@ for _, name := range volumeArrays {
 dgKernel.AllocateArray(name, int64(K*Np*8))
 }
 
-// Face arrays: K*Nfp*4 elements
-faceArrays := []string{"faceFlux", "nx", "ny", "nz", "Fscale", "vmapM"}
+// Face arrays: K*Nfp*Nfaces elements  
+faceArrays := []string{"nx", "ny", "nz", "Fscale", "vmapM"}
 for _, name := range faceArrays {
-dgKernel.AllocateArray(name, int64(K*Nfp*4*8))
+dgKernel.AllocateArray(name, int64(K*Nfp*Nfaces*8))
 }
 
-// Face buffer data (from FaceBuffer preprocessing)
-// localPIndices: P location for each interior face point
-// faceTypes: classification of each face point
-dgKernel.AllocateArray("localPIndices", int64(K*Nfp*4*4))  // int32
-dgKernel.AllocateArray("faceTypes", int64(K*Nfp*4))        // uint8
+// Face values array for all faces
+dgKernel.AllocateArray("faceValues", int64(K*Nfp*Nfaces*8))
 
-// Ghost buffer for remote faces (if multi-partition)
-numRemoteFaces := countRemoteFaces(el)
-if numRemoteFaces > 0 {
-dgKernel.AllocateArray("ghostFaceBuffer", int64(numRemoteFaces*8))
-dgKernel.AllocateArray("remoteSendIndices", int64(numRemoteFaces*4))
+// Face index array (face-level connectivity)
+dgKernel.AllocateArray("faceIndex", int64(K*Nfaces*4)) // int32
+
+// Remote face buffers
+totalRemoteSends := 0
+for _, indices := range fb.RemoteSendIndices {
+totalRemoteSends += len(indices)
+}
+if totalRemoteSends > 0 {
+// Each partition has its own remote buffer
+dgKernel.AllocateArray("remoteFaceBuffers", int64(totalRemoteSends*8))
+dgKernel.AllocateArray("remoteSendIndices", int64(totalRemoteSends*4))
 }
 }
 
-func copyMeshData(dgKernel *kernel_program.DGKernel, el *DG3D.Element3D) {
+func copyMeshData(dgKernel *kernel_program.DGKernel, el *DG3D.Element3D, fb *facebuffer.FaceBuffer) {
 dgKernel.CopyFromHost("x", el.X.Data())
 dgKernel.CopyFromHost("y", el.Y.Data())
 dgKernel.CopyFromHost("z", el.Z.Data())
 dgKernel.CopyFromHost("rx", el.Rx.Data())
-// ... etc for all arrays
+// ... etc for all geometry arrays
 dgKernel.CopyFromHost("vmapM", el.VmapM)
-dgKernel.CopyFromHost("vmapP", el.VmapP)
+
+// Copy face index array
+dgKernel.CopyFromHost("faceIndex", fb.FaceIndex)
+
+// Copy remote send indices if present
+if len(fb.RemoteSendIndices) > 0 {
+// Flatten RemoteSendIndices into single array
+var allIndices []uint32
+for _, indices := range fb.RemoteSendIndices {
+allIndices = append(allIndices, indices...)
+}
+dgKernel.CopyFromHost("remoteSendIndices", allIndices)
+}
+}
+
+func hasRemoteFaces(fb *facebuffer.FaceBuffer) bool {
+return len(fb.RemoteSendIndices) > 0
 }
 
 func norm(data []float64) float64 {
@@ -342,74 +375,41 @@ sum += v * v
 }
 return math.Sqrt(sum / float64(len(data)))
 }
-```
 
-## Generated Kernel Example
+func applyBC(uM float64, bcType int) float64 {
+switch bcType {
+case 1: // Wall
+return -uM
+case 2: // Outflow
+return uM
+case 3: // Inflow
+return 1.0 // prescribed value
+default:
+return uM
+}
+}
 
-```c
-// Static matrices embedded
-static const real_t Dr_TET_P3[20][20] = { /* ... */ };
-static const real_t Ds_TET_P3[20][20] = { /* ... */ };
-static const real_t Dt_TET_P3[20][20] = { /* ... */ };
-
-// Generated operator macro - operates on entire partition
-#define PhysicalGradient_TET(u, rx, ry, rz, sx, sy, sz, tx, ty, tz, ux, uy, uz) do { \
-    MATMUL_Dr(u, workspace_ur, K[part]); \
-    MATMUL_Ds(u, workspace_us, K[part]); \
-    MATMUL_Dt(u, workspace_ut, K[part]); \
-    for (int elem = 0; elem < K[part]; ++elem; @inner) { \
-        for (int n = 0; n < 20; ++n) { \
-            int id = elem * 20 + n; \
-            ux[id] = rx[id]*workspace_ur[id] + sx[id]*workspace_us[id] + tx[id]*workspace_ut[id]; \
-            uy[id] = ry[id]*workspace_ur[id] + sy[id]*workspace_us[id] + ty[id]*workspace_ut[id]; \
-            uz[id] = rz[id]*workspace_ur[id] + sz[id]*workspace_us[id] + tz[id]*workspace_ut[id]; \
-        } \
-    } \
-} while(0)
-
-// The computeRHS kernel
-@kernel void computeRHS(
-    const int_t* K,
-    const real_t* u_global, const int_t* u_offsets,
-    const real_t* resu_global, const int_t* resu_offsets,
-    // ... all other arrays ...
-    const real_t rk_a_scalar,
-    const real_t rk_b_dt_scalar
-) {
-    for (int part = 0; part < 1; ++part; @outer) {
-        // Workspace for gradient operator
-        real_t workspace_ur[20 * K[part]];
-        real_t workspace_us[20 * K[part]];
-        real_t workspace_ut[20 * K[part]];
-        
-        // Allocate gradient arrays
-        real_t ux[20 * K[part]];
-        real_t uy[20 * K[part]];
-        real_t uz[20 * K[part]];
-        
-        // Apply gradient operator to ENTIRE partition
-        PhysicalGradient_TET(u_PART(part), 
-                           rx_PART(part), ry_PART(part), rz_PART(part),
-                           sx_PART(part), sy_PART(part), sz_PART(part),
-                           tx_PART(part), ty_PART(part), tz_PART(part),
-                           ux, uy, uz);
-        
-        // Now process elements for flux and surface terms
-        for (int elem = 0; elem < K[part]; ++elem; @inner) {
-            // Element-specific computations using the gradients
-            // computed by the operator
-        }
-    }
+func extractBCData(el *DG3D.Element3D) map[int32]int32 {
+// This would extract BC info from mesh
+// For now, return empty map (defaults to wall BC)
+return make(map[int32]int32)
 }
 ```
 
-## Summary
+## Key Design Features
 
-This corrected example shows:
+1. **Face-Level Indexing**: Uses `faceIndex[Nfaces × K]` array instead of per-point arrays
+2. **Face Values Buffer**: Single `faceValues` array stores both M and P values for interior faces
+3. **Direct P Calculation**: For interior faces, P location = `face_code + point_offset`
+4. **Single Exchange Stage**: `exchangeFaceValues` handles all face data preparation at start of time step
+5. **Aligned Memory**: Remote buffers use alignment to prevent false sharing between partitions
+6. **Shared Memory Copy**: Device-side copy between partitions (MPI ready for distributed systems)
 
-1. **Operators work on partitions**: PhysicalGradient operates on K[part] elements at once
-2. **MATMUL operates on arrays**: `MATMUL_Dr(u, workspace_ur, K[part])` processes entire partition
-3. **Operators contain @inner loops**: Transform loops are inside the operator
-4. **Single element operations**: Only used for flux calculations and LIFT (which is per-element)
+## Performance Benefits
 
-The key insight is that DGKernelV2 operators are partition-level operations that leverage the efficiency of matrix operations across many elements simultaneously.
+- Sequential memory access through face values buffer
+- Minimal branching (one check per face, not per point)
+- No counters needed for interior faces
+- Compact face index array (4×K instead of Nfp×4×K)
+- Efficient inter-partition communication with aligned buffers
+- Face exchange at start of time step, constant during RK stages
