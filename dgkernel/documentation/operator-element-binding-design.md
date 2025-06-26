@@ -1,14 +1,14 @@
-# Operator-Element Binding Design for DGKernelV2
+# Operator-Element Binding Design for DGKernel
 
 ## Overview
 
-This document describes the design considerations and patterns for binding finite element definitions to operator implementations in DGKernelV2. The goal is to enable different element implementations to fulfill common operator contracts while maintaining implementation flexibility.
+This system enables users to compose DG algorithms from operators (Gradient, Divergence, Lift, etc.) without knowing element implementation details. Element providers define operator specifications once per element type. The kernel builder uses these specifications to generate optimized code.
+
+**Key principle**: Element experts define operators once. Algorithm developers use them many times.
 
 ## Background
 
 ### The Standards Landscape
-
-The finite element community has several standards and conventions:
 
 1. **UFL (Unified Form Language)**: Standardizes element type specification (family, degree, cell shape) and weak form expression, but NOT operator implementations
 2. **NUDG++ Conventions**: De facto standard matrix naming (Dr, Ds, Dt, LIFT) from Hesthaven & Warburton
@@ -113,14 +113,9 @@ Element provides:
 - Geometric factors as separate arrays
 ```
 
-Key design choices:
-- LIFT combines all faces into one matrix
-- Nodal basis on specific point distributions
-- Dense matrix storage
-
 ### Implementation Variations
 
-Different element types can fulfill the same contracts through different computational paths:
+Different element types fulfill the same contracts through different computational paths:
 
 #### Standard Path (Hesthaven/NUDG++)
 ```yaml
@@ -157,9 +152,6 @@ The DFR divergence operator requires the vector field to be represented in the R
 - **Output**: Divergence at Lagrange nodes (interior only)
 - **Matrix**: Div is [Np × NpRT], not [Np × 3Np]
 
-#### Key Insight
-The same contract (input/output dimensions and meaning) can be fulfilled through completely different computational mechanisms. The binding specifies which path each element takes.
-
 ### Node Topology Considerations
 
 #### Shared Nodes (Hesthaven Style)
@@ -179,12 +171,6 @@ Output: [Np, K] volume contributions
 ```
 
 ## Binding Specification
-
-### Purpose
-The binding specification declares:
-1. Which operator contracts an element can fulfill
-2. What components/matrices are used for each
-3. How the computation is organized for macro generation
 
 ### Complete Binding Example
 
@@ -262,15 +248,6 @@ element:
         matrices_used: [Dr, Ds, Dt]
         macro_pattern: "standard_gradient"
         
-    PhysicalGradient:
-      contract_fulfilled: true
-      input_dims: [Np, K]  # Lagrange space
-      output_dims: [Np, K]
-      implementation:
-        matrices_used: [Dr, Ds, Dt]
-        geometry_used: [rx, ry, rz, sx, sy, sz, tx, ty, tz]
-        macro_pattern: "standard_physical_gradient"
-        
     Divergence:
       contract_fulfilled: true
       input_dims: [NpRT, K]  # RT space - DIFFERENT!
@@ -280,13 +257,6 @@ element:
         macro_pattern: "dfr_divergence"
         note: "Input must be in RT polynomial space"
 ```
-
-## Design Principles
-
-1. **Contract-Based**: Focus on what operators need, not how elements provide it
-2. **Convention-Aware**: Recognize NUDG++ as de facto standard while allowing variations
-3. **Implementation-Flexible**: Different elements can fulfill contracts differently
-4. **Explicit Binding**: Clear specification of which element matrices fulfill which operator needs
 
 ## Macro Generation
 
@@ -377,10 +347,10 @@ The macro generation process:
 2. **Select macro pattern** based on binding
 3. **Extract dimensions** (Np, Nfp, etc.) from element
 4. **Generate macro** with correct:
-    - Matrix names from binding
-    - Dimensions from element
-    - Computation pattern from macro_pattern
-    - Any special handling (e.g., RT divergence)
+   - Matrix names from binding
+   - Dimensions from element
+   - Computation pattern from macro_pattern
+   - Any special handling (e.g., RT divergence)
 
 ### Validation During Generation
 
@@ -389,22 +359,6 @@ The generator verifies:
 - Required matrices are available
 - Geometry factors are provided when needed
 - Workspace requirements are satisfied
-
-## Implementation Strategies
-
-### For DGKernelV2
-
-1. **Define standard operator contracts** based on NUDG++ conventions
-2. **Allow element implementations** to declare how they fulfill contracts
-3. **Validate at binding time** that elements provide required matrices
-4. **Generate optimized operators** based on element properties
-
-### For Element Providers
-
-1. **Implement standard matrix names** (Dr, Ds, Dt, LIFT)
-2. **Document conventions** (face ordering, node distribution)
-3. **Declare supported operators** explicitly
-4. **Provide validation** of matrix dimensions and properties
 
 ## Summary
 
@@ -422,4 +376,4 @@ This design enables:
 - **Performance**: Each element can optimize its operator implementation
 - **Validation**: Contracts ensure dimensional compatibility
 
-The key insight is that mathematical contracts (what operators do) are separate from implementation mechanisms (how they do it). This allows both standard elements (like Hesthaven's) and novel approaches to coexist within the same framework, each fulfilling the same contracts in their own optimal way.
+The key insight is that mathematical contracts (what operators do) are separate from implementation mechanisms (how they do it).
