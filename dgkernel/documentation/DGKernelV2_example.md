@@ -163,6 +163,7 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
             Geometry: []string{"rx", "ry", "rz", "sx", "sy", "sz", 
                               "tx", "ty", "tz", "nx", "ny", "nz", "Fscale"},
             Connectivity: []string{"vmapM", "faceIndex", "remoteSendIndices", "remoteSendOffsets",
+                              "sendPackSrcIndex", "sendPackDstIndex", "totalSendPack",
                               "receiveBufferToM", "totalReceiveSize", "receiveSrcPart", "receiveSrcIndex"},
             FaceData: []string{"faceValues", "sendBuffer", "receiveBuffer"},
             BufferInfo: []string{"sendOffsets", "receiveOffsets", "sendSizes", "receiveSizes"},
@@ -194,8 +195,7 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
     // Stage 2: Compose face buffers
     builder.AddStage("composeFaceBuffers",
         DGKernel.StageSpec{
-            Inputs:  []string{"u", "vmapM", "remoteSendIndices", "remoteSendOffsets", 
-                             "faceIndex", "sendOffsets", "sendSizes"},
+            Inputs:  []string{"u", "vmapM", "sendPackSrcIndex", "sendPackDstIndex", "totalSendPack"},
             Outputs: []string{"faceValues", "sendBuffer"},
             Source: `
             // Create partition-level aliases
@@ -203,10 +203,9 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
             const int* vmapM = vmapM_PART(part);
             real_t* faceValues = faceValues_PART(part);
             real_t* sendBuffer = sendBuffer_PART(part);
-            const int* remoteSendIndices = remoteSendIndices_PART(part);
-            const int* remoteSendOffsets = remoteSendOffsets_PART(part);
-            const int* sendOffsets = sendOffsets_PART(part);
-            const int* sendSizes = sendSizes_PART(part);
+            const int* sendPackSrcIndex = sendPackSrcIndex_PART(part);
+            const int* sendPackDstIndex = sendPackDstIndex_PART(part);
+            int totalSendPack = totalSendPack_PART(part)[0];
             
             // Extract all face values to faceValues array
             for (int elem = 0; elem < KpartMax; ++elem; @inner) {
@@ -221,18 +220,12 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
                 }
             }
             
-            // Pack send buffer for other partitions
-            // Use pre-computed offsets and sizes from host
-            for (int targetPart = 0; targetPart < NPART; ++targetPart) {
-                if (targetPart != part && sendSizes[targetPart] > 0) {
-                    int startIdx = remoteSendOffsets[targetPart];
-                    int count = sendSizes[targetPart];
-                    int bufferStart = sendOffsets[targetPart];
-                    
-                    for (int i = 0; i < count; ++i; @inner) {
-                        int fIdx = remoteSendIndices[startIdx + i];
-                        sendBuffer[bufferStart + i] = faceValues[fIdx];
-                    }
+            // Pack send buffer using pre-computed indices
+            for (int i = 0; i < totalSendPackMax; ++i; @inner) {
+                if (i < totalSendPack) {
+                    int srcIdx = sendPackSrcIndex[i];
+                    int dstIdx = sendPackDstIndex[i];
+                    sendBuffer[dstIdx] = faceValues[srcIdx];
                 }
             }`,
         })
@@ -369,100 +362,112 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
 
 ```go
 func allocateArrays(dgKernel *DGKernel.DGKernel, el *DG3D.Element3D, fb *facebuffer.FaceBuffer) {
-Np := el.Np
-Nfp := el.Nfp
-Nfaces := 4
-K := el.K
+    Np := el.Np
+    Nfp := el.Nfp
+    Nfaces := 4
+    K := el.K
 
-// Volume arrays: K*Np elements
-volumeArrays := []string{"x", "y", "z", "u", "resu",
-"rx", "ry", "rz", "sx", "sy", "sz", "tx", "ty", "tz"}
-for _, name := range volumeArrays {
-dgKernel.AllocateArray(name, int64(K*Np*8))
-}
+    // Volume arrays: K*Np elements
+    volumeArrays := []string{"x", "y", "z", "u", "resu",
+        "rx", "ry", "rz", "sx", "sy", "sz", "tx", "ty", "tz"}
+    for _, name := range volumeArrays {
+        dgKernel.AllocateArray(name, int64(K*Np*8))
+    }
 
-// Face arrays: K*Nfp*Nfaces elements  
-faceArrays := []string{"nx", "ny", "nz", "Fscale", "vmapM"}
-for _, name := range faceArrays {
-dgKernel.AllocateArray(name, int64(K*Nfp*Nfaces*8))
-}
+    // Face arrays: K*Nfp*Nfaces elements  
+    faceArrays := []string{"nx", "ny", "nz", "Fscale", "vmapM"}
+    for _, name := range faceArrays {
+        dgKernel.AllocateArray(name, int64(K*Nfp*Nfaces*8))
+    }
 
-// Face values array for all faces
-dgKernel.AllocateArray("faceValues", int64(K*Nfp*Nfaces*8))
+    // Face values array for all faces
+    dgKernel.AllocateArray("faceValues", int64(K*Nfp*Nfaces*8))
 
-// Face index array: K*Nfaces elements
-dgKernel.AllocateArray("faceIndex", int64(K*Nfaces*4))
+    // Face index array: K*Nfaces elements
+    dgKernel.AllocateArray("faceIndex", int64(K*Nfaces*4))
 
-// Remote connectivity arrays
-dgKernel.AllocateArray("remoteSendIndices", int64(fb.NumRemoteSends*4))
-dgKernel.AllocateArray("remoteSendOffsets", int64(fb.NumPartitions*4))
-
-// Remote receive mapping
-dgKernel.AllocateArray("receiveBufferToM", int64(fb.TotalReceiveSize*4))
-dgKernel.AllocateArray("totalReceiveSize", int64(fb.NumPartitions*4))
-dgKernel.AllocateArray("receiveSrcPart", int64(fb.TotalReceiveSize*4))
-dgKernel.AllocateArray("receiveSrcIndex", int64(fb.TotalReceiveSize*4))
-
-// Remote buffers with pre-computed sizes from face buffer
-dgKernel.AllocateArray("sendBuffer", int64(fb.TotalSendSize*8))
-dgKernel.AllocateArray("receiveBuffer", int64(fb.TotalReceiveSize*8))
-
-// Buffer size and offset arrays
-dgKernel.AllocateArray("sendSizes", int64(fb.NumPartitions*fb.NumPartitions*4))
-dgKernel.AllocateArray("receiveSizes", int64(fb.NumPartitions*fb.NumPartitions*4))
-dgKernel.AllocateArray("sendOffsets", int64(fb.NumPartitions*fb.NumPartitions*4))
-dgKernel.AllocateArray("receiveOffsets", int64(fb.NumPartitions*fb.NumPartitions*4))
+    // Remote connectivity arrays
+    dgKernel.AllocateArray("remoteSendIndices", int64(fb.NumRemoteSends*4))
+    dgKernel.AllocateArray("remoteSendOffsets", int64(fb.NumPartitions*4))
+    
+    // Send buffer packing indices
+    dgKernel.AllocateArray("sendPackSrcIndex", int64(fb.TotalSendSize*4))
+    dgKernel.AllocateArray("sendPackDstIndex", int64(fb.TotalSendSize*4))
+    dgKernel.AllocateArray("totalSendPack", int64(fb.NumPartitions*4))
+    
+    // Remote receive mapping
+    dgKernel.AllocateArray("receiveBufferToM", int64(fb.TotalReceiveSize*4))
+    dgKernel.AllocateArray("totalReceiveSize", int64(fb.NumPartitions*4))
+    dgKernel.AllocateArray("receiveSrcPart", int64(fb.TotalReceiveSize*4))
+    dgKernel.AllocateArray("receiveSrcIndex", int64(fb.TotalReceiveSize*4))
+    
+    // Remote buffers with pre-computed sizes from face buffer
+    dgKernel.AllocateArray("sendBuffer", int64(fb.TotalSendSize*8))
+    dgKernel.AllocateArray("receiveBuffer", int64(fb.TotalReceiveSize*8))
+    
+    // Buffer size and offset arrays
+    dgKernel.AllocateArray("sendSizes", int64(fb.NumPartitions*fb.NumPartitions*4))
+    dgKernel.AllocateArray("receiveSizes", int64(fb.NumPartitions*fb.NumPartitions*4))
+    dgKernel.AllocateArray("sendOffsets", int64(fb.NumPartitions*fb.NumPartitions*4))
+    dgKernel.AllocateArray("receiveOffsets", int64(fb.NumPartitions*fb.NumPartitions*4))
 }
 
 func copyMeshData(dgKernel *DGKernel.DGKernel, el *DG3D.Element3D, fb *facebuffer.FaceBuffer) {
-// Copy coordinate data
-dgKernel.CopyArrayToDevice("x", el.X)
-dgKernel.CopyArrayToDevice("y", el.Y)
-dgKernel.CopyArrayToDevice("z", el.Z)
+    // Copy coordinate data
+    dgKernel.CopyArrayToDevice("x", el.X)
+    dgKernel.CopyArrayToDevice("y", el.Y) 
+    dgKernel.CopyArrayToDevice("z", el.Z)
 
-// Copy geometric factors
-dgKernel.CopyArrayToDevice("rx", el.Rx)
-dgKernel.CopyArrayToDevice("ry", el.Ry)
-dgKernel.CopyArrayToDevice("rz", el.Rz)
-dgKernel.CopyArrayToDevice("sx", el.Sx)
-dgKernel.CopyArrayToDevice("sy", el.Sy)
-dgKernel.CopyArrayToDevice("sz", el.Sz)
-dgKernel.CopyArrayToDevice("tx", el.Tx)
-dgKernel.CopyArrayToDevice("ty", el.Ty)
-dgKernel.CopyArrayToDevice("tz", el.Tz)
+    // Copy geometric factors
+    dgKernel.CopyArrayToDevice("rx", el.Rx)
+    dgKernel.CopyArrayToDevice("ry", el.Ry)
+    dgKernel.CopyArrayToDevice("rz", el.Rz)
+    dgKernel.CopyArrayToDevice("sx", el.Sx)
+    dgKernel.CopyArrayToDevice("sy", el.Sy)
+    dgKernel.CopyArrayToDevice("sz", el.Sz)
+    dgKernel.CopyArrayToDevice("tx", el.Tx)
+    dgKernel.CopyArrayToDevice("ty", el.Ty)
+    dgKernel.CopyArrayToDevice("tz", el.Tz)
 
-// Copy surface normals and scaling
-dgKernel.CopyArrayToDevice("nx", el.Nx)
-dgKernel.CopyArrayToDevice("ny", el.Ny)
-dgKernel.CopyArrayToDevice("nz", el.Nz)
-dgKernel.CopyArrayToDevice("Fscale", el.Fscale)
+    // Copy surface normals and scaling
+    dgKernel.CopyArrayToDevice("nx", el.Nx)
+    dgKernel.CopyArrayToDevice("ny", el.Ny)
+    dgKernel.CopyArrayToDevice("nz", el.Nz)
+    dgKernel.CopyArrayToDevice("Fscale", el.Fscale)
 
-// Copy connectivity
-dgKernel.CopyArrayToDevice("vmapM", el.VmapM)
-dgKernel.CopyArrayToDevice("faceIndex", fb.FaceIndex)
-dgKernel.CopyArrayToDevice("remoteSendIndices", fb.RemoteSendIndices)
-dgKernel.CopyArrayToDevice("remoteSendOffsets", fb.RemoteSendOffsets)
-dgKernel.CopyArrayToDevice("receiveBufferToM", fb.ReceiveBufferToM)
-dgKernel.CopyArrayToDevice("totalReceiveSize", fb.TotalReceiveSize)
-dgKernel.CopyArrayToDevice("receiveSrcPart", fb.ReceiveSrcPart)
-dgKernel.CopyArrayToDevice("receiveSrcIndex", fb.ReceiveSrcIndex)
-
-// Copy buffer sizes and offsets from face buffer
-dgKernel.CopyArrayToDevice("sendSizes", fb.SendSizes)
-dgKernel.CopyArrayToDevice("receiveSizes", fb.ReceiveSizes)
-dgKernel.CopyArrayToDevice("sendOffsets", fb.SendOffsets)
-dgKernel.CopyArrayToDevice("receiveOffsets", fb.ReceiveOffsets)
+    // Copy connectivity
+    dgKernel.CopyArrayToDevice("vmapM", el.VmapM)
+    dgKernel.CopyArrayToDevice("faceIndex", fb.FaceIndex)
+    dgKernel.CopyArrayToDevice("remoteSendIndices", fb.RemoteSendIndices)
+    dgKernel.CopyArrayToDevice("remoteSendOffsets", fb.RemoteSendOffsets)
+    
+    // Copy send packing indices
+    dgKernel.CopyArrayToDevice("sendPackSrcIndex", fb.SendPackSrcIndex)
+    dgKernel.CopyArrayToDevice("sendPackDstIndex", fb.SendPackDstIndex)
+    dgKernel.CopyArrayToDevice("totalSendPack", fb.TotalSendPack)
+    
+    // Copy receive mapping indices
+    dgKernel.CopyArrayToDevice("receiveBufferToM", fb.ReceiveBufferToM)
+    dgKernel.CopyArrayToDevice("totalReceiveSize", fb.TotalReceiveSize)
+    dgKernel.CopyArrayToDevice("receiveSrcPart", fb.ReceiveSrcPart)
+    dgKernel.CopyArrayToDevice("receiveSrcIndex", fb.ReceiveSrcIndex)
+    
+    // Copy buffer sizes and offsets from face buffer
+    dgKernel.CopyArrayToDevice("sendSizes", fb.SendSizes)
+    dgKernel.CopyArrayToDevice("receiveSizes", fb.ReceiveSizes)
+    dgKernel.CopyArrayToDevice("sendOffsets", fb.SendOffsets)
+    dgKernel.CopyArrayToDevice("receiveOffsets", fb.ReceiveOffsets)
 }
 ```
 
 ## Face Buffer Design Benefits
 
 1. **Face-Level Indexing**: Uses `faceIndex[Nfaces × K]` array instead of per-point arrays
-1. **Face Values Buffer**: Single `faceValues` array stores both M and P values for interior faces
-1. **Direct P Calculation**: For interior faces, P location = `face_code + point_offset`
-1. **Cache-Line Aligned Buffers**: Send and receive buffers are padded to cache line boundaries to prevent false sharing
-1. **Host-Side Buffer Management**: All buffer sizing and allocation done on host before kernel execution
-1. **Efficient Inter-Partition Copy**: Aligned buffers allow simultaneous copies without cache conflicts
+2. **Face Values Buffer**: Single `faceValues` array stores both M and P values for interior faces
+3. **Direct P Calculation**: For interior faces, P location = `face_code + point_offset`
+4. **Cache-Line Aligned Buffers**: Send and receive buffers are padded to cache line boundaries to prevent false sharing
+5. **Host-Side Buffer Management**: All buffer sizing and allocation done on host before kernel execution
+6. **Efficient Inter-Partition Copy**: Aligned buffers allow simultaneous copies without cache conflicts
 
 ## Performance Benefits
 
@@ -472,3 +477,61 @@ dgKernel.CopyArrayToDevice("receiveOffsets", fb.ReceiveOffsets)
 - Compact face index array (4×K instead of Nfp×4×K)
 - Cache-line alignment prevents false sharing during parallel buffer copies
 - Pre-computed buffer sizes eliminate dynamic allocation overhead
+
+## Host-Side Index Computation
+
+The face buffer must compute the following index arrays on the host:
+
+### Send Buffer Packing Indices
+```go
+// Compute flattened indices for packing send buffer
+func computeSendPackIndices(fb *FaceBuffer) {
+    fb.SendPackSrcIndex = make([]int32, fb.TotalSendSize)
+    fb.SendPackDstIndex = make([]int32, fb.TotalSendSize)
+    fb.TotalSendPack = make([]int32, fb.NumPartitions)
+    
+    idx := 0
+    for part := 0; part < fb.NumPartitions; part++ {
+        startIdx := 0
+        for targetPart := 0; targetPart < fb.NumPartitions; targetPart++ {
+            if targetPart != part && fb.SendSizes[part*fb.NumPartitions+targetPart] > 0 {
+                count := fb.SendSizes[part*fb.NumPartitions+targetPart]
+                bufferStart := fb.SendOffsets[part*fb.NumPartitions+targetPart]
+                
+                for i := 0; i < count; i++ {
+                    fIdx := fb.RemoteSendIndices[part][fb.RemoteSendOffsets[part][targetPart] + i]
+                    fb.SendPackSrcIndex[part][idx] = fIdx
+                    fb.SendPackDstIndex[part][idx] = bufferStart + i
+                    idx++
+                }
+            }
+        }
+        fb.TotalSendPack[part] = idx
+    }
+}
+```
+
+### Receive Buffer Copy Indices
+```go
+// Compute indices for copying from send buffers to receive buffers
+func computeReceiveCopyIndices(fb *FaceBuffer) {
+    fb.ReceiveSrcPart = make([]int32, fb.TotalReceiveSize)
+    fb.ReceiveSrcIndex = make([]int32, fb.TotalReceiveSize)
+    
+    for part := 0; part < fb.NumPartitions; part++ {
+        idx := 0
+        for srcPart := 0; srcPart < fb.NumPartitions; srcPart++ {
+            if srcPart != part && fb.ReceiveSizes[part*fb.NumPartitions+srcPart] > 0 {
+                srcBase := fb.SendOffsets[srcPart*fb.NumPartitions+part]
+                count := fb.ReceiveSizes[part*fb.NumPartitions+srcPart]
+                
+                for i := 0; i < count; i++ {
+                    fb.ReceiveSrcPart[part][idx] = srcPart
+                    fb.ReceiveSrcIndex[part][idx] = srcBase + i
+                    idx++
+                }
+            }
+        }
+    }
+}
+```
