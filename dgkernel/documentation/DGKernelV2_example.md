@@ -156,24 +156,24 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 
 ```go
 func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *facebuffer.FaceBuffer) error {
-// Persistent arrays
-builder.SetPersistentArrays(
-DGKernel.PersistentArrays{
-Solution: []string{"u", "resu"},
-Geometry: []string{"rx", "ry", "rz", "sx", "sy", "sz",
-"tx", "ty", "tz", "nx", "ny", "nz", "Fscale"},
-Connectivity: []string{"vmapM", "faceIndex", "remoteSendIndices", "remoteSendOffsets",
-"receiveBufferToM", "totalReceiveSize"},
-FaceData: []string{"faceValues", "sendBuffer", "receiveBuffer"},
-BufferInfo: []string{"sendOffsets", "receiveOffsets", "sendSizes", "receiveSizes"},
-})
-
-// Stage 1: Initialize
-builder.AddStage("initialize",
-DGKernel.StageSpec{
-Inputs:  []string{"x", "y", "z"},
-Outputs: []string{"u"},
-Source: `
+    // Persistent arrays
+    builder.SetPersistentArrays(
+        DGKernel.PersistentArrays{
+            Solution: []string{"u", "resu"},
+            Geometry: []string{"rx", "ry", "rz", "sx", "sy", "sz", 
+                              "tx", "ty", "tz", "nx", "ny", "nz", "Fscale"},
+            Connectivity: []string{"vmapM", "faceIndex", "remoteSendIndices", "remoteSendOffsets",
+                              "receiveBufferToM", "totalReceiveSize", "receiveSrcPart", "receiveSrcIndex"},
+            FaceData: []string{"faceValues", "sendBuffer", "receiveBuffer"},
+            BufferInfo: []string{"sendOffsets", "receiveOffsets", "sendSizes", "receiveSizes"},
+        })
+    
+    // Stage 1: Initialize
+    builder.AddStage("initialize",
+        DGKernel.StageSpec{
+            Inputs:  []string{"x", "y", "z"},
+            Outputs: []string{"u"},
+            Source: `
             // Create partition-level aliases
             const real_t* x = x_PART(part);
             const real_t* y = y_PART(part);
@@ -189,28 +189,24 @@ Source: `
                     }
                 }
             }`,
-})
-
-// Stage 2: Compose face buffers
-builder.AddStage("composeFaceBuffers",
-DGKernel.StageSpec{
-Inputs:  []string{"u", "vmapM", "remoteSendIndices", "remoteSendOffsets",
-"faceIndex", "sendOffsets", "sendSizes",
-"sendBuffer", "receiveBuffer", "receiveOffsets", "receiveSizes"},
-Outputs: []string{"faceValues", "sendBuffer", "receiveBuffer"},
-Source: `
+        })
+    
+    // Stage 2: Compose face buffers
+    builder.AddStage("composeFaceBuffers",
+        DGKernel.StageSpec{
+            Inputs:  []string{"u", "vmapM", "remoteSendIndices", "remoteSendOffsets", 
+                             "faceIndex", "sendOffsets", "sendSizes"},
+            Outputs: []string{"faceValues", "sendBuffer"},
+            Source: `
             // Create partition-level aliases
             const real_t* u = u_PART(part);
             const int* vmapM = vmapM_PART(part);
             real_t* faceValues = faceValues_PART(part);
             real_t* sendBuffer = sendBuffer_PART(part);
-            real_t* receiveBuffer = receiveBuffer_PART(part);
             const int* remoteSendIndices = remoteSendIndices_PART(part);
             const int* remoteSendOffsets = remoteSendOffsets_PART(part);
             const int* sendOffsets = sendOffsets_PART(part);
             const int* sendSizes = sendSizes_PART(part);
-            const int* receiveOffsets = receiveOffsets_PART(part);
-            const int* receiveSizes = receiveSizes_PART(part);
             
             // Extract all face values to faceValues array
             for (int elem = 0; elem < KpartMax; ++elem; @inner) {
@@ -238,37 +234,23 @@ Source: `
                         sendBuffer[bufferStart + i] = faceValues[fIdx];
                     }
                 }
-            }
-            
-            // Copy remote face data from other partitions' send buffers
-            // Each partition's section starts on a cache line boundary (handled by offsets)
-            for (int srcPart = 0; srcPart < NPART; ++srcPart) {
-                if (srcPart != part && receiveSizes[srcPart] > 0) {
-                    int srcStart = sendOffsets_PART(srcPart)[part];
-                    int dstStart = receiveOffsets[srcPart];
-                    int dataSize = receiveSizes[srcPart];
-                    
-                    // Copy actual data (not padding)
-                    for (int i = 0; i < dataSize; ++i; @inner) {
-                        receiveBuffer[dstStart + i] = sendBuffer_PART(srcPart)[srcStart + i];
-                    }
-                }
             }`,
-})
-
-// Stage 3: Compute RHS with face fluxes inline
-builder.AddStage("computeRHS",
-DGKernel.StageSpec{
-Inputs:  []string{"u", "resu", "rx", "ry", "rz",
-"sx", "sy", "sz", "tx", "ty", "tz",
-"faceValues", "nx", "ny", "nz", "Fscale",
-"faceIndex", "receiveBuffer", "receiveBufferToM", "totalReceiveSize"},
-Outputs: []string{"u", "resu"},
-AdditionalArgs: []DGKernel.ArgSpec{
-{Name: "a", Type: DGKernel.Float64},
-{Name: "b_dt", Type: DGKernel.Float64},
-},
-Source: `
+        })
+    
+    // Stage 3: Compute RHS with face fluxes inline
+    builder.AddStage("computeRHS",
+        DGKernel.StageSpec{
+            Inputs:  []string{"u", "resu", "rx", "ry", "rz", 
+                             "sx", "sy", "sz", "tx", "ty", "tz",
+                             "faceValues", "nx", "ny", "nz", "Fscale", 
+                             "faceIndex", "receiveBuffer", "receiveBufferToM", "totalReceiveSize",
+                             "sendBuffer", "receiveSrcPart", "receiveSrcIndex"},
+            Outputs: []string{"u", "resu"},
+            AdditionalArgs: []DGKernel.ArgSpec{
+                {Name: "a", Type: DGKernel.Float64},
+                {Name: "b_dt", Type: DGKernel.Float64},
+            },
+            Source: `
             // Create partition-level aliases
             real_t* u = u_PART(part);
             real_t* resu = resu_PART(part);
@@ -287,11 +269,22 @@ Source: `
             const real_t* nz = nz_PART(part);
             const real_t* Fscale = Fscale_PART(part);
             const int* faceIndex = faceIndex_PART(part);
-            const real_t* receiveBuffer = receiveBuffer_PART(part);
+            real_t* receiveBuffer = receiveBuffer_PART(part);
             const int* receiveBufferToM = receiveBufferToM_PART(part);
             int totalReceive = totalReceiveSize_PART(part)[0];
+            const int* receiveSrcPart = receiveSrcPart_PART(part);
+            const int* receiveSrcIndex = receiveSrcIndex_PART(part);
             
-            // First unpack remote face values in parallel
+            // Copy remote face data from other partitions' send buffers
+            for (int i = 0; i < totalReceiveMax; ++i; @inner) {
+                if (i < totalReceive) {
+                    int srcPart = receiveSrcPart[i];
+                    int srcIdx = receiveSrcIndex[i];
+                    receiveBuffer[i] = sendBuffer_PART(srcPart)[srcIdx];
+                }
+            }
+            
+            // Now unpack remote face values in parallel
             for (int i = 0; i < totalReceiveMax; ++i; @inner) {
                 if (i < totalReceive) {
                     int mFaceIdx = receiveBufferToM[i];
@@ -366,9 +359,9 @@ Source: `
                     }
                 }
             }`,
-})
-
-return builder.Build()
+        })
+    
+    return builder.Build()
 }
 ```
 
@@ -407,6 +400,8 @@ dgKernel.AllocateArray("remoteSendOffsets", int64(fb.NumPartitions*4))
 // Remote receive mapping
 dgKernel.AllocateArray("receiveBufferToM", int64(fb.TotalReceiveSize*4))
 dgKernel.AllocateArray("totalReceiveSize", int64(fb.NumPartitions*4))
+dgKernel.AllocateArray("receiveSrcPart", int64(fb.TotalReceiveSize*4))
+dgKernel.AllocateArray("receiveSrcIndex", int64(fb.TotalReceiveSize*4))
 
 // Remote buffers with pre-computed sizes from face buffer
 dgKernel.AllocateArray("sendBuffer", int64(fb.TotalSendSize*8))
@@ -449,6 +444,8 @@ dgKernel.CopyArrayToDevice("remoteSendIndices", fb.RemoteSendIndices)
 dgKernel.CopyArrayToDevice("remoteSendOffsets", fb.RemoteSendOffsets)
 dgKernel.CopyArrayToDevice("receiveBufferToM", fb.ReceiveBufferToM)
 dgKernel.CopyArrayToDevice("totalReceiveSize", fb.TotalReceiveSize)
+dgKernel.CopyArrayToDevice("receiveSrcPart", fb.ReceiveSrcPart)
+dgKernel.CopyArrayToDevice("receiveSrcIndex", fb.ReceiveSrcIndex)
 
 // Copy buffer sizes and offsets from face buffer
 dgKernel.CopyArrayToDevice("sendSizes", fb.SendSizes)
