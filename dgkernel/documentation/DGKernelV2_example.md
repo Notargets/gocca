@@ -158,23 +158,23 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 
 ```go
 func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *facebuffer.FaceBuffer) error {
-// Persistent arrays
-builder.SetPersistentArrays(
-DGKernel.PersistentArrays{
-Solution: []string{"u", "resu"},
-Geometry: []string{"rx", "ry", "rz", "sx", "sy", "sz",
-"tx", "ty", "tz", "nx", "ny", "nz", "Fscale"},
-Connectivity: []string{"vmapM", "faceIndex", "remoteSendIndices", "remoteSendOffsets"},
-FaceData: []string{"faceValues", "sendBuffer", "receiveBuffer"},
-BufferInfo: []string{"sendOffsets", "receiveOffsets", "sendSizes", "receiveSizes"},
-})
-
-// Stage 1: Initialize
-builder.AddStage("initialize",
-DGKernel.StageSpec{
-Inputs:  []string{"x", "y", "z"},
-Outputs: []string{"u"},
-Source: `
+    // Persistent arrays
+    builder.SetPersistentArrays(
+        DGKernel.PersistentArrays{
+            Solution: []string{"u", "resu"},
+            Geometry: []string{"rx", "ry", "rz", "sx", "sy", "sz", 
+                              "tx", "ty", "tz", "nx", "ny", "nz", "Fscale"},
+            Connectivity: []string{"vmapM", "faceIndex", "remoteSendIndices", "remoteSendOffsets"},
+            FaceData: []string{"faceValues", "sendBuffer", "receiveBuffer"},
+            BufferInfo: []string{"sendOffsets", "receiveOffsets", "sendSizes", "receiveSizes"},
+        })
+    
+    // Stage 1: Initialize
+    builder.AddStage("initialize",
+        DGKernel.StageSpec{
+            Inputs:  []string{"x", "y", "z"},
+            Outputs: []string{"u"},
+            Source: `
             // Create partition-level aliases
             const real_t* x = x_PART(part);
             const real_t* y = y_PART(part);
@@ -188,15 +188,15 @@ Source: `
                     u[id] = exp(-10.0 * r2);
                 }
             }`,
-})
-
-// Stage 2: Compose face buffers
-builder.AddStage("composeFaceBuffers",
-DGKernel.StageSpec{
-Inputs:  []string{"u", "vmapM", "remoteSendIndices", "remoteSendOffsets",
-"faceIndex", "sendOffsets", "sendSizes"},
-Outputs: []string{"faceValues", "sendBuffer"},
-Source: `
+        })
+    
+    // Stage 2: Compose face buffers
+    builder.AddStage("composeFaceBuffers",
+        DGKernel.StageSpec{
+            Inputs:  []string{"u", "vmapM", "remoteSendIndices", "remoteSendOffsets", 
+                             "faceIndex", "sendOffsets", "sendSizes"},
+            Outputs: []string{"faceValues", "sendBuffer"},
+            Source: `
             // Create partition-level aliases
             const real_t* u = u_PART(part);
             const int* vmapM = vmapM_PART(part);
@@ -232,22 +232,22 @@ Source: `
                     }
                 }
             }`,
-})
-
-// Stage 3: Compute RHS with face fluxes inline
-builder.AddStage("computeRHS",
-DGKernel.StageSpec{
-Inputs:  []string{"u", "resu", "rx", "ry", "rz",
-"sx", "sy", "sz", "tx", "ty", "tz",
-"faceValues", "nx", "ny", "nz", "Fscale",
-"faceIndex", "sendBuffer", "sendOffsets", "sendSizes",
-"receiveBuffer", "receiveOffsets", "receiveSizes"},
-Outputs: []string{"u", "resu"},
-AdditionalArgs: []DGKernel.ArgSpec{
-{Name: "a", Type: DGKernel.Float64},
-{Name: "b_dt", Type: DGKernel.Float64},
-},
-Source: `
+        })
+    
+    // Stage 3: Compute RHS with face fluxes inline
+    builder.AddStage("computeRHS",
+        DGKernel.StageSpec{
+            Inputs:  []string{"u", "resu", "rx", "ry", "rz", 
+                             "sx", "sy", "sz", "tx", "ty", "tz",
+                             "faceValues", "nx", "ny", "nz", "Fscale", 
+                             "faceIndex", "sendBuffer", "sendOffsets", "sendSizes",
+                             "receiveBuffer", "receiveOffsets", "receiveSizes"},
+            Outputs: []string{"u", "resu"},
+            AdditionalArgs: []DGKernel.ArgSpec{
+                {Name: "a", Type: DGKernel.Float64},
+                {Name: "b_dt", Type: DGKernel.Float64},
+            },
+            Source: `
             // Create partition-level aliases
             real_t* u = u_PART(part);
             real_t* resu = resu_PART(part);
@@ -273,9 +273,9 @@ Source: `
             const int* sendSizes = sendSizes_PART(part);
             const int* receiveSizes = receiveSizes_PART(part);
             
-            // Compute volume gradients
+            // Compute volume gradients using the PHYSICALGRADIENT operator macro
             real_t ux[NP_TET*KpartMax], uy[NP_TET*KpartMax], uz[NP_TET*KpartMax];
-            PhysicalGradient(u, rx, ry, rz, sx, sy, sz, tx, ty, tz, ux, uy, uz);
+            PHYSICALGRADIENT(u, rx, ry, rz, sx, sy, sz, tx, ty, tz, ux, uy, uz);
             
             // Copy remote face data from other partitions' send buffers
             // Each partition's section starts on a cache line boundary
@@ -292,17 +292,17 @@ Source: `
                 }
             }
             
+            // Compute face fluxes for the entire partition first
+            real_t faceFlux[KpartMax * NFACES_TET * NFP_TET];
+            
             // Remote face counters per source partition
             int remote_counters[MAX_PARTITIONS];
             for (int p = 0; p < MAX_PARTITIONS; ++p) {
                 remote_counters[p] = receiveOffsets[p];
             }
             
-            // Process each element
+            // Compute all face fluxes
             for (int elem = 0; elem < K[part]; ++elem; @inner) {
-                // First compute face fluxes for this element
-                real_t elemFaceFlux[NFP_TET * NFACES_TET];
-                
                 for (int face = 0; face < NFACES_TET; ++face) {
                     int face_code = faceIndex[face + elem*NFACES_TET];
                     
@@ -332,10 +332,17 @@ Source: `
                         
                         // Store scaled flux
                         real_t normalFlux = flux * (nx[fIdx] + ny[fIdx] + nz[fIdx]);
-                        elemFaceFlux[face*NFP_TET + fp] = normalFlux * Fscale[fIdx];
+                        faceFlux[elem*NFACES_TET*NFP_TET + face*NFP_TET + fp] = normalFlux * Fscale[fIdx];
                     }
                 }
-                
+            }
+            
+            // Apply LIFT to all face fluxes for the entire partition
+            real_t lifted[NP_TET*KpartMax];
+            MATMUL_LIFT(faceFlux, lifted, K[part]);
+            
+            // Update solution for all elements
+            for (int elem = 0; elem < K[part]; ++elem; @inner) {
                 // Update residual
                 for (int n = 0; n < NP_TET; ++n) {
                     int id = elem * NP_TET + n;
@@ -343,25 +350,17 @@ Source: `
                 }
                 
                 // Volume contribution: div(F) where F = u²/2
-                real_t rhs[NP_TET];
                 for (int n = 0; n < NP_TET; ++n) {
                     int id = elem * NP_TET + n;
-                    rhs[n] = -u[id] * (ux[id] + uy[id] + uz[id]);
-                }
-                
-                // Apply LIFT to face flux
-                real_t lifted[NP_TET];
-                MATMUL_LIFT(elemFaceFlux, lifted, 1);
-                
-                // Update solution
-                for (int n = 0; n < NP_TET; ++n) {
-                    int id = elem * NP_TET + n;
-                    u[id] = resu[id] + b_dt * (rhs[n] + lifted[n]);
+                    real_t rhs = -u[id] * (ux[id] + uy[id] + uz[id]);
+                    
+                    // Update solution
+                    u[id] = resu[id] + b_dt * (rhs + lifted[id]);
                 }
             }`,
-})
-
-return builder.Build()
+        })
+    
+    return builder.Build()
 }
 ```
 
