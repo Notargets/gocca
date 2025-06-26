@@ -58,7 +58,7 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 				Nfp := el.Nfp
 				Nfaces := 4
 				return map[string]int{
-					"NP": Np,
+					"NP": Np, 
 					"NFP": Nfp,
 					"NFACES": Nfaces,
 				}
@@ -135,7 +135,7 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 	for step := 0; step < Nsteps; step++ {
 		// Compose face buffers from local data
 		dgKernel.ExecuteStage("composeFaceBuffers")
-
+		
 		for INTRK := 0; INTRK < 5; INTRK++ {
 			// Compute RHS including face fluxes and update solution
 			dgKernel.ExecuteStage("computeRHS", rk4a[INTRK], rk4b[INTRK]*dt)
@@ -166,7 +166,7 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D, fb 
                               "tx", "ty", "tz", "nx", "ny", "nz", "Fscale"},
             Connectivity: []string{"vmapM", "faceIndex", "remoteSendIndices", "remoteSendOffsets"},
             FaceData: []string{"faceValues", "sendBuffer", "receiveBuffer"},
-            BufferInfo: []string{"sendOffsets", "receiveOffsets"},
+            BufferInfo: []string{"sendOffsets", "receiveOffsets", "sendSizes", "receiveSizes"},
         })
     
     // Stage 1: Initialize
@@ -187,7 +187,8 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D, fb 
     // Stage 2: Compose face buffers
     builder.AddStage("composeFaceBuffers",
         kernel_program.StageSpec{
-            Inputs:  []string{"u", "vmapM", "remoteSendIndices", "faceIndex", "sendOffsets"},
+            Inputs:  []string{"u", "vmapM", "remoteSendIndices", "remoteSendOffsets", 
+                             "faceIndex", "sendOffsets", "sendSizes"},
             Outputs: []string{"faceValues", "sendBuffer"},
             Source: `
             // Extract all face values to faceValues array
@@ -202,16 +203,16 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D, fb 
             }
             
             // Pack send buffer for other partitions
-            // Use pre-computed offsets from host
+            // Use pre-computed offsets and sizes from host
             for (int targetPart = 0; targetPart < NPART; ++targetPart) {
-                if (targetPart != part) {
+                if (targetPart != part && sendSizes_PART(part)[targetPart] > 0) {
                     int startIdx = remoteSendOffsets_PART(part)[targetPart];
-                    int endIdx = remoteSendOffsets_PART(part)[targetPart + 1];
+                    int count = sendSizes_PART(part)[targetPart];
+                    int bufferStart = sendOffsets_PART(part)[targetPart];
                     
-                    for (int i = startIdx; i < endIdx; ++i; @inner) {
-                        int fIdx = remoteSendIndices_PART(part)[i];
-                        int bufferPos = sendOffsets_PART(part)[targetPart] + (i - startIdx);
-                        sendBuffer_PART(part)[bufferPos] = faceValues_PART(part)[fIdx];
+                    for (int i = 0; i < count; ++i; @inner) {
+                        int fIdx = remoteSendIndices_PART(part)[startIdx + i];
+                        sendBuffer_PART(part)[bufferStart + i] = faceValues_PART(part)[fIdx];
                     }
                 }
             }`,
@@ -223,7 +224,7 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D, fb 
             Inputs:  []string{"u", "resu", "rx", "ry", "rz", 
                              "sx", "sy", "sz", "tx", "ty", "tz",
                              "faceValues", "nx", "ny", "nz", "Fscale", 
-                             "faceIndex", "sendBuffer", "sendOffsets", 
+                             "faceIndex", "sendBuffer", "sendOffsets", "sendSizes",
                              "receiveBuffer", "receiveOffsets", "receiveSizes"},
             Outputs: []string{"u", "resu"},
             Source: `
@@ -240,7 +241,7 @@ func buildKernels(builder *kernel_program.KernelBuilder, el *DG3D.Element3D, fb 
             // Copy remote face data from other partitions' send buffers
             // Each partition's section starts on a cache line boundary
             for (int srcPart = 0; srcPart < NPART; ++srcPart) {
-                if (srcPart != part) {
+                if (srcPart != part && receiveSizes_PART(part)[srcPart] > 0) {
                     int srcStart = sendOffsets_PART(srcPart)[part];
                     int dstStart = receiveOffsets_PART(part)[srcPart];
                     int dataSize = receiveSizes_PART(part)[srcPart];
@@ -473,14 +474,20 @@ func allocateRemoteBuffers(dgKernel *kernel_program.DGKernel,
     dgKernel.CopyFromHost("sendOffsets", sendOffsets)
     dgKernel.CopyFromHost("receiveOffsets", receiveOffsets)
     
-    // Also copy size information for actual data (not including padding)
+    // Create and copy size arrays (actual data sizes, not including padding)
+    sendSizesArray := make([]int32, MAX_PARTITIONS)
     receiveSizesArray := make([]int32, MAX_PARTITIONS)
     for p := 0; p < MAX_PARTITIONS; p++ {
+        if size, ok := sendSizes[p]; ok {
+            sendSizesArray[p] = int32(size)
+        }
         if size, ok := receiveSizes[p]; ok {
             receiveSizesArray[p] = int32(size)
         }
     }
+    dgKernel.AllocateArray("sendSizes", int64(MAX_PARTITIONS*4))
     dgKernel.AllocateArray("receiveSizes", int64(MAX_PARTITIONS*4))
+    dgKernel.CopyFromHost("sendSizes", sendSizesArray)
     dgKernel.CopyFromHost("receiveSizes", receiveSizesArray)
 }
 
@@ -536,11 +543,11 @@ const CACHE_LINE_FLOATS = 32
 ## Key Design Features
 
 1. **Face-Level Indexing**: Uses `faceIndex[Nfaces × K]` array instead of per-point arrays
-2. **Face Values Buffer**: Single `faceValues` array stores both M and P values for interior faces
-3. **Direct P Calculation**: For interior faces, P location = `face_code + point_offset`
-4. **Cache-Line Aligned Buffers**: Send and receive buffers are padded to cache line boundaries to prevent false sharing
-5. **Host-Side Buffer Management**: All buffer sizing and allocation done on host before kernel execution
-6. **Efficient Inter-Partition Copy**: Aligned buffers allow simultaneous copies without cache conflicts
+1. **Face Values Buffer**: Single `faceValues` array stores both M and P values for interior faces
+1. **Direct P Calculation**: For interior faces, P location = `face_code + point_offset`
+1. **Cache-Line Aligned Buffers**: Send and receive buffers are padded to cache line boundaries to prevent false sharing
+1. **Host-Side Buffer Management**: All buffer sizing and allocation done on host before kernel execution
+1. **Efficient Inter-Partition Copy**: Aligned buffers allow simultaneous copies without cache conflicts
 
 ## Performance Benefits
 
