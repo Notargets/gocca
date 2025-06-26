@@ -1,6 +1,3 @@
-for step := 0; step < Nsteps; step++ {
-// Compose face buffers from local data
-dgKernel.ExecuteStage("composeFaceBuffers")
 # DGKernelV2 Example: 3D Scalar Burgers Equation
 
 This example demonstrates building a 3D Burgers equation solver using DGKernelV2 with the face buffer design pattern.
@@ -61,7 +58,7 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 				Nfp := el.Nfp
 				Nfaces := 4
 				return map[string]int{
-					"NP": Np, 
+					"NP": Np,
 					"NFP": Nfp,
 					"NFACES": Nfaces,
 				}
@@ -121,11 +118,7 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 	copyMeshData(dgKernel, el, fb)
 	dgKernel.ExecuteStage("initialize")
 
-	// 5. Compute buffer sizes and allocate remote buffers
-	sendSizes, receiveSizes, sendOffsets, receiveOffsets := computeRemoteBufferSizes(fb, el)
-	allocateRemoteBuffers(dgKernel, sendSizes, receiveSizes, sendOffsets, receiveOffsets)
-
-	// 6. Time stepping
+	// 5. Time stepping
 	dt := 0.01
 	Nsteps := int(finalTime / dt)
 
@@ -140,7 +133,7 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 	for step := 0; step < Nsteps; step++ {
 		// Compose face buffers from local data
 		dgKernel.ExecuteStage("composeFaceBuffers")
-		
+
 		for INTRK := 0; INTRK < 5; INTRK++ {
 			// Compute RHS including face fluxes and update solution
 			dgKernel.ExecuteStage("computeRHS", rk4a[INTRK], rk4b[INTRK]*dt)
@@ -163,24 +156,24 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 
 ```go
 func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *facebuffer.FaceBuffer) error {
-    // Persistent arrays
-    builder.SetPersistentArrays(
-        DGKernel.PersistentArrays{
-            Solution: []string{"u", "resu"},
-            Geometry: []string{"rx", "ry", "rz", "sx", "sy", "sz", 
-                              "tx", "ty", "tz", "nx", "ny", "nz", "Fscale"},
-            Connectivity: []string{"vmapM", "faceIndex", "remoteSendIndices", "remoteSendOffsets",
-                              "receiveBufferToM", "totalReceiveSize"},
-            FaceData: []string{"faceValues", "sendBuffer", "receiveBuffer"},
-            BufferInfo: []string{"sendOffsets", "receiveOffsets", "sendSizes", "receiveSizes"},
-        })
-    
-    // Stage 1: Initialize
-    builder.AddStage("initialize",
-        DGKernel.StageSpec{
-            Inputs:  []string{"x", "y", "z"},
-            Outputs: []string{"u"},
-            Source: `
+// Persistent arrays
+builder.SetPersistentArrays(
+DGKernel.PersistentArrays{
+Solution: []string{"u", "resu"},
+Geometry: []string{"rx", "ry", "rz", "sx", "sy", "sz",
+"tx", "ty", "tz", "nx", "ny", "nz", "Fscale"},
+Connectivity: []string{"vmapM", "faceIndex", "remoteSendIndices", "remoteSendOffsets",
+"receiveBufferToM", "totalReceiveSize"},
+FaceData: []string{"faceValues", "sendBuffer", "receiveBuffer"},
+BufferInfo: []string{"sendOffsets", "receiveOffsets", "sendSizes", "receiveSizes"},
+})
+
+// Stage 1: Initialize
+builder.AddStage("initialize",
+DGKernel.StageSpec{
+Inputs:  []string{"x", "y", "z"},
+Outputs: []string{"u"},
+Source: `
             // Create partition-level aliases
             const real_t* x = x_PART(part);
             const real_t* y = y_PART(part);
@@ -196,24 +189,28 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
                     }
                 }
             }`,
-        })
-    
-    // Stage 2: Compose face buffers
-    builder.AddStage("composeFaceBuffers",
-        DGKernel.StageSpec{
-            Inputs:  []string{"u", "vmapM", "remoteSendIndices", "remoteSendOffsets", 
-                             "faceIndex", "sendOffsets", "sendSizes"},
-            Outputs: []string{"faceValues", "sendBuffer"},
-            Source: `
+})
+
+// Stage 2: Compose face buffers
+builder.AddStage("composeFaceBuffers",
+DGKernel.StageSpec{
+Inputs:  []string{"u", "vmapM", "remoteSendIndices", "remoteSendOffsets",
+"faceIndex", "sendOffsets", "sendSizes",
+"sendBuffer", "receiveBuffer", "receiveOffsets", "receiveSizes"},
+Outputs: []string{"faceValues", "sendBuffer", "receiveBuffer"},
+Source: `
             // Create partition-level aliases
             const real_t* u = u_PART(part);
             const int* vmapM = vmapM_PART(part);
             real_t* faceValues = faceValues_PART(part);
             real_t* sendBuffer = sendBuffer_PART(part);
+            real_t* receiveBuffer = receiveBuffer_PART(part);
             const int* remoteSendIndices = remoteSendIndices_PART(part);
             const int* remoteSendOffsets = remoteSendOffsets_PART(part);
             const int* sendOffsets = sendOffsets_PART(part);
             const int* sendSizes = sendSizes_PART(part);
+            const int* receiveOffsets = receiveOffsets_PART(part);
+            const int* receiveSizes = receiveSizes_PART(part);
             
             // Extract all face values to faceValues array
             for (int elem = 0; elem < KpartMax; ++elem; @inner) {
@@ -241,22 +238,37 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
                         sendBuffer[bufferStart + i] = faceValues[fIdx];
                     }
                 }
+            }
+            
+            // Copy remote face data from other partitions' send buffers
+            // Each partition's section starts on a cache line boundary (handled by offsets)
+            for (int srcPart = 0; srcPart < NPART; ++srcPart) {
+                if (srcPart != part && receiveSizes[srcPart] > 0) {
+                    int srcStart = sendOffsets_PART(srcPart)[part];
+                    int dstStart = receiveOffsets[srcPart];
+                    int dataSize = receiveSizes[srcPart];
+                    
+                    // Copy actual data (not padding)
+                    for (int i = 0; i < dataSize; ++i; @inner) {
+                        receiveBuffer[dstStart + i] = sendBuffer_PART(srcPart)[srcStart + i];
+                    }
+                }
             }`,
-        })
-    
-    // Stage 3: Compute RHS with face fluxes inline
-    builder.AddStage("computeRHS",
-        DGKernel.StageSpec{
-            Inputs:  []string{"u", "resu", "rx", "ry", "rz", 
-                             "sx", "sy", "sz", "tx", "ty", "tz",
-                             "faceValues", "nx", "ny", "nz", "Fscale", 
-                             "faceIndex", "receiveBuffer", "receiveBufferToM", "totalReceiveSize"},
-            Outputs: []string{"u", "resu"},
-            AdditionalArgs: []DGKernel.ArgSpec{
-                {Name: "a", Type: DGKernel.Float64},
-                {Name: "b_dt", Type: DGKernel.Float64},
-            },
-            Source: `
+})
+
+// Stage 3: Compute RHS with face fluxes inline
+builder.AddStage("computeRHS",
+DGKernel.StageSpec{
+Inputs:  []string{"u", "resu", "rx", "ry", "rz",
+"sx", "sy", "sz", "tx", "ty", "tz",
+"faceValues", "nx", "ny", "nz", "Fscale",
+"faceIndex", "receiveBuffer", "receiveBufferToM", "totalReceiveSize"},
+Outputs: []string{"u", "resu"},
+AdditionalArgs: []DGKernel.ArgSpec{
+{Name: "a", Type: DGKernel.Float64},
+{Name: "b_dt", Type: DGKernel.Float64},
+},
+Source: `
             // Create partition-level aliases
             real_t* u = u_PART(part);
             real_t* resu = resu_PART(part);
@@ -269,7 +281,7 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
             const real_t* tx = tx_PART(part);
             const real_t* ty = ty_PART(part);
             const real_t* tz = tz_PART(part);
-            const real_t* faceValues = faceValues_PART(part);
+            real_t* faceValues = faceValues_PART(part);
             const real_t* nx = nx_PART(part);
             const real_t* ny = ny_PART(part);
             const real_t* nz = nz_PART(part);
@@ -294,18 +306,9 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
             // Compute face fluxes for the entire partition
             real_t faceFlux[KpartMax * NFACES_TET * NFP_TET];
             
-            // Compute all face fluxes face counters per source partition
-            int remote_counters[MAX_PARTITIONS];
-            for (int p = 0; p < MAX_PARTITIONS; ++p) {
-                remote_counters[p] = receiveOffsets[p];
-            }
-            
             // Compute all face fluxes
             for (int elem = 0; elem < KpartMax; ++elem; @inner) {
                 if (elem < K[part]) {
-                    // Local counter for remote faces in this element
-                    int remote_counter = 0;
-                    
                     for (int face = 0; face < NFACES_TET; ++face) {
                         int face_code = faceIndex[face + elem*NFACES_TET];
                         
@@ -321,10 +324,8 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
                                 // Interior face: P from faceValues at offset
                                 uP = faceValues[face_code + fp];
                             } else if (face_code == -9999) {
-                                // Remote face: P from receive buffer
-                                int sourcePart = remoteSourcePartition(elem, face);
-                                int base = receiveOffsets[sourcePart] + getRemoteElementOffset(elem);
-                                uP = receiveBuffer[base + remote_counter++];
+                                // Remote face: already in faceValues from unpack
+                                uP = faceValues[fIdx];
                             } else {
                                 // Boundary face: apply BC
                                 uP = applyBC(uM, -face_code);
@@ -365,9 +366,9 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
                     }
                 }
             }`,
-        })
-    
-    return builder.Build()
+})
+
+return builder.Build()
 }
 ```
 
@@ -406,6 +407,16 @@ dgKernel.AllocateArray("remoteSendOffsets", int64(fb.NumPartitions*4))
 // Remote receive mapping
 dgKernel.AllocateArray("receiveBufferToM", int64(fb.TotalReceiveSize*4))
 dgKernel.AllocateArray("totalReceiveSize", int64(fb.NumPartitions*4))
+
+// Remote buffers with pre-computed sizes from face buffer
+dgKernel.AllocateArray("sendBuffer", int64(fb.TotalSendSize*8))
+dgKernel.AllocateArray("receiveBuffer", int64(fb.TotalReceiveSize*8))
+
+// Buffer size and offset arrays
+dgKernel.AllocateArray("sendSizes", int64(fb.NumPartitions*fb.NumPartitions*4))
+dgKernel.AllocateArray("receiveSizes", int64(fb.NumPartitions*fb.NumPartitions*4))
+dgKernel.AllocateArray("sendOffsets", int64(fb.NumPartitions*fb.NumPartitions*4))
+dgKernel.AllocateArray("receiveOffsets", int64(fb.NumPartitions*fb.NumPartitions*4))
 }
 
 func copyMeshData(dgKernel *DGKernel.DGKernel, el *DG3D.Element3D, fb *facebuffer.FaceBuffer) {
@@ -438,45 +449,12 @@ dgKernel.CopyArrayToDevice("remoteSendIndices", fb.RemoteSendIndices)
 dgKernel.CopyArrayToDevice("remoteSendOffsets", fb.RemoteSendOffsets)
 dgKernel.CopyArrayToDevice("receiveBufferToM", fb.ReceiveBufferToM)
 dgKernel.CopyArrayToDevice("totalReceiveSize", fb.TotalReceiveSize)
-}
 
-func computeRemoteBufferSizes(fb *facebuffer.FaceBuffer, el *DG3D.Element3D) (
-sendSizes, receiveSizes, sendOffsets, receiveOffsets []int) {
-
-numPartitions := fb.NumPartitions
-sendSizes = make([]int, numPartitions*numPartitions)
-receiveSizes = make([]int, numPartitions*numPartitions)
-sendOffsets = make([]int, numPartitions*numPartitions)
-receiveOffsets = make([]int, numPartitions*numPartitions)
-
-// Compute sizes based on face buffer connectivity
-// Implementation depends on face buffer structure
-
-return
-}
-
-func allocateRemoteBuffers(dgKernel *DGKernel.DGKernel,
-sendSizes, receiveSizes, sendOffsets, receiveOffsets []int) {
-
-totalSendSize := 0
-totalReceiveSize := 0
-
-for _, size := range sendSizes {
-totalSendSize += size
-}
-for _, size := range receiveSizes {
-totalReceiveSize += size
-}
-
-// Allocate padded buffers
-dgKernel.AllocateArray("sendBuffer", int64(totalSendSize*8))
-dgKernel.AllocateArray("receiveBuffer", int64(totalReceiveSize*8))
-
-// Copy size and offset arrays
-dgKernel.CopyArrayToDevice("sendSizes", sendSizes)
-dgKernel.CopyArrayToDevice("receiveSizes", receiveSizes)
-dgKernel.CopyArrayToDevice("sendOffsets", sendOffsets)
-dgKernel.CopyArrayToDevice("receiveOffsets", receiveOffsets)
+// Copy buffer sizes and offsets from face buffer
+dgKernel.CopyArrayToDevice("sendSizes", fb.SendSizes)
+dgKernel.CopyArrayToDevice("receiveSizes", fb.ReceiveSizes)
+dgKernel.CopyArrayToDevice("sendOffsets", fb.SendOffsets)
+dgKernel.CopyArrayToDevice("receiveOffsets", fb.ReceiveOffsets)
 }
 ```
 
