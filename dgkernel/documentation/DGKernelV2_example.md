@@ -1,3 +1,6 @@
+for step := 0; step < Nsteps; step++ {
+// Compose face buffers from local data
+dgKernel.ExecuteStage("composeFaceBuffers")
 # DGKernelV2 Example: 3D Scalar Burgers Equation
 
 This example demonstrates building a 3D Burgers equation solver using DGKernelV2 with the face buffer design pattern.
@@ -58,7 +61,7 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 				Nfp := el.Nfp
 				Nfaces := 4
 				return map[string]int{
-					"NP": Np,
+					"NP": Np, 
 					"NFP": Nfp,
 					"NFACES": Nfaces,
 				}
@@ -89,12 +92,14 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
                 MATMUL_Dt(u, workspace_ut, K[part]);
                 
                 // Transform to physical derivatives
-                for (int elem = 0; elem < K[part]; ++elem; @inner) {
-                    for (int n = 0; n < NP_TET; ++n) {
-                        int id = elem * NP_TET + n;
-                        ux[id] = rx[id]*workspace_ur[id] + sx[id]*workspace_us[id] + tx[id]*workspace_ut[id];
-                        uy[id] = ry[id]*workspace_ur[id] + sy[id]*workspace_us[id] + ty[id]*workspace_ut[id];
-                        uz[id] = rz[id]*workspace_ur[id] + sz[id]*workspace_us[id] + tz[id]*workspace_ut[id];
+                for (int elem = 0; elem < KpartMax; ++elem; @inner) {
+                    if (elem < K[part]) {
+                        for (int n = 0; n < NP_TET; ++n) {
+                            int id = elem * NP_TET + n;
+                            ux[id] = rx[id]*workspace_ur[id] + sx[id]*workspace_us[id] + tx[id]*workspace_ut[id];
+                            uy[id] = ry[id]*workspace_ur[id] + sy[id]*workspace_us[id] + ty[id]*workspace_ut[id];
+                            uz[id] = rz[id]*workspace_ur[id] + sz[id]*workspace_us[id] + tz[id]*workspace_ut[id];
+                        }
                     }
                 }`
 			},
@@ -135,7 +140,7 @@ func RunBurgers3D(el *DG3D.Element3D, finalTime float64) error {
 	for step := 0; step < Nsteps; step++ {
 		// Compose face buffers from local data
 		dgKernel.ExecuteStage("composeFaceBuffers")
-
+		
 		for INTRK := 0; INTRK < 5; INTRK++ {
 			// Compute RHS including face fluxes and update solution
 			dgKernel.ExecuteStage("computeRHS", rk4a[INTRK], rk4b[INTRK]*dt)
@@ -164,7 +169,8 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
             Solution: []string{"u", "resu"},
             Geometry: []string{"rx", "ry", "rz", "sx", "sy", "sz", 
                               "tx", "ty", "tz", "nx", "ny", "nz", "Fscale"},
-            Connectivity: []string{"vmapM", "faceIndex", "remoteSendIndices", "remoteSendOffsets"},
+            Connectivity: []string{"vmapM", "faceIndex", "remoteSendIndices", "remoteSendOffsets",
+                              "receiveBufferToM", "totalReceiveSize"},
             FaceData: []string{"faceValues", "sendBuffer", "receiveBuffer"},
             BufferInfo: []string{"sendOffsets", "receiveOffsets", "sendSizes", "receiveSizes"},
         })
@@ -181,11 +187,13 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
             const real_t* z = z_PART(part);
             real_t* u = u_PART(part);
             
-            for (int elem = 0; elem < K[part]; ++elem; @inner) {
-                for (int n = 0; n < NP_TET; ++n) {
-                    int id = elem * NP_TET + n;
-                    real_t r2 = x[id]*x[id] + y[id]*y[id] + z[id]*z[id];
-                    u[id] = exp(-10.0 * r2);
+            for (int elem = 0; elem < KpartMax; ++elem; @inner) {
+                if (elem < K[part]) {
+                    for (int n = 0; n < NP_TET; ++n) {
+                        int id = elem * NP_TET + n;
+                        real_t r2 = x[id]*x[id] + y[id]*y[id] + z[id]*z[id];
+                        u[id] = exp(-10.0 * r2);
+                    }
                 }
             }`,
         })
@@ -208,12 +216,14 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
             const int* sendSizes = sendSizes_PART(part);
             
             // Extract all face values to faceValues array
-            for (int elem = 0; elem < K[part]; ++elem; @inner) {
-                for (int face = 0; face < NFACES_TET; ++face) {
-                    for (int fp = 0; fp < NFP_TET; ++fp) {
-                        int fIdx = elem*NFACES_TET*NFP_TET + face*NFP_TET + fp;
-                        int volIdx = vmapM[fIdx];
-                        faceValues[fIdx] = u[volIdx];
+            for (int elem = 0; elem < KpartMax; ++elem; @inner) {
+                if (elem < K[part]) {
+                    for (int face = 0; face < NFACES_TET; ++face) {
+                        for (int fp = 0; fp < NFP_TET; ++fp) {
+                            int fIdx = elem*NFACES_TET*NFP_TET + face*NFP_TET + fp;
+                            int volIdx = vmapM[fIdx];
+                            faceValues[fIdx] = u[volIdx];
+                        }
                     }
                 }
             }
@@ -240,8 +250,7 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
             Inputs:  []string{"u", "resu", "rx", "ry", "rz", 
                              "sx", "sy", "sz", "tx", "ty", "tz",
                              "faceValues", "nx", "ny", "nz", "Fscale", 
-                             "faceIndex", "sendBuffer", "sendOffsets", "sendSizes",
-                             "receiveBuffer", "receiveOffsets", "receiveSizes"},
+                             "faceIndex", "receiveBuffer", "receiveBufferToM", "totalReceiveSize"},
             Outputs: []string{"u", "resu"},
             AdditionalArgs: []DGKernel.ArgSpec{
                 {Name: "a", Type: DGKernel.Float64},
@@ -266,73 +275,69 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
             const real_t* nz = nz_PART(part);
             const real_t* Fscale = Fscale_PART(part);
             const int* faceIndex = faceIndex_PART(part);
-            const real_t* sendBuffer = sendBuffer_PART(part);
-            real_t* receiveBuffer = receiveBuffer_PART(part);
-            const int* sendOffsets = sendOffsets_PART(part);
-            const int* receiveOffsets = receiveOffsets_PART(part);
-            const int* sendSizes = sendSizes_PART(part);
-            const int* receiveSizes = receiveSizes_PART(part);
+            const real_t* receiveBuffer = receiveBuffer_PART(part);
+            const int* receiveBufferToM = receiveBufferToM_PART(part);
+            int totalReceive = totalReceiveSize_PART(part)[0];
+            
+            // First unpack remote face values in parallel
+            for (int i = 0; i < totalReceiveMax; ++i; @inner) {
+                if (i < totalReceive) {
+                    int mFaceIdx = receiveBufferToM[i];
+                    faceValues[mFaceIdx] = receiveBuffer[i];
+                }
+            }
             
             // Compute volume gradients using the PHYSICALGRADIENT operator macro
             real_t ux[NP_TET*KpartMax], uy[NP_TET*KpartMax], uz[NP_TET*KpartMax];
             PHYSICALGRADIENT(u, rx, ry, rz, sx, sy, sz, tx, ty, tz, ux, uy, uz);
             
-            // Copy remote face data from other partitions' send buffers
-            // Each partition's section starts on a cache line boundary
-            for (int srcPart = 0; srcPart < NPART; ++srcPart) {
-                if (srcPart != part && receiveSizes[srcPart] > 0) {
-                    int srcStart = sendOffsets_PART(srcPart)[part];
-                    int dstStart = receiveOffsets[srcPart];
-                    int dataSize = receiveSizes[srcPart];
-                    
-                    // Copy actual data (not padding)
-                    for (int i = 0; i < dataSize; ++i; @inner) {
-                        receiveBuffer[dstStart + i] = sendBuffer_PART(srcPart)[srcStart + i];
-                    }
-                }
-            }
-            
-            // Compute face fluxes for the entire partition first
+            // Compute face fluxes for the entire partition
             real_t faceFlux[KpartMax * NFACES_TET * NFP_TET];
             
-            // Remote face counters per source partition
+            // Compute all face fluxes face counters per source partition
             int remote_counters[MAX_PARTITIONS];
             for (int p = 0; p < MAX_PARTITIONS; ++p) {
                 remote_counters[p] = receiveOffsets[p];
             }
             
             // Compute all face fluxes
-            for (int elem = 0; elem < K[part]; ++elem; @inner) {
-                for (int face = 0; face < NFACES_TET; ++face) {
-                    int face_code = faceIndex[face + elem*NFACES_TET];
+            for (int elem = 0; elem < KpartMax; ++elem; @inner) {
+                if (elem < K[part]) {
+                    // Local counter for remote faces in this element
+                    int remote_counter = 0;
                     
-                    for (int fp = 0; fp < NFP_TET; ++fp) {
-                        int fIdx = elem*NFACES_TET*NFP_TET + face*NFP_TET + fp;
+                    for (int face = 0; face < NFACES_TET; ++face) {
+                        int face_code = faceIndex[face + elem*NFACES_TET];
                         
-                        // M value from faceValues
-                        real_t uM = faceValues[fIdx];
-                        real_t uP;
-                        
-                        // Get P value based on face type
-                        if (face_code >= 0) {
-                            // Interior face: P from faceValues at offset
-                            uP = faceValues[face_code + fp];
-                        } else if (face_code == -9999) {
-                            // Remote face: P from receive buffer
-                            int sourcePart = remoteSourcePartition(elem, face);
-                            uP = receiveBuffer[remote_counters[sourcePart]++];
-                        } else {
-                            // Boundary face: apply BC
-                            uP = applyBC(uM, -face_code);
+                        for (int fp = 0; fp < NFP_TET; ++fp) {
+                            int fIdx = elem*NFACES_TET*NFP_TET + face*NFP_TET + fp;
+                            
+                            // M value from faceValues
+                            real_t uM = faceValues[fIdx];
+                            real_t uP;
+                            
+                            // Get P value based on face type
+                            if (face_code >= 0) {
+                                // Interior face: P from faceValues at offset
+                                uP = faceValues[face_code + fp];
+                            } else if (face_code == -9999) {
+                                // Remote face: P from receive buffer
+                                int sourcePart = remoteSourcePartition(elem, face);
+                                int base = receiveOffsets[sourcePart] + getRemoteElementOffset(elem);
+                                uP = receiveBuffer[base + remote_counter++];
+                            } else {
+                                // Boundary face: apply BC
+                                uP = applyBC(uM, -face_code);
+                            }
+                            
+                            // Compute numerical flux (Lax-Friedrichs)
+                            real_t alpha = fmax(fabs(uM), fabs(uP));
+                            real_t flux = 0.5 * (0.5*(uM*uM + uP*uP) - alpha*(uP - uM));
+                            
+                            // Store scaled flux
+                            real_t normalFlux = flux * (nx[fIdx] + ny[fIdx] + nz[fIdx]);
+                            faceFlux[elem*NFACES_TET*NFP_TET + face*NFP_TET + fp] = normalFlux * Fscale[fIdx];
                         }
-                        
-                        // Compute numerical flux (Lax-Friedrichs)
-                        real_t alpha = fmax(fabs(uM), fabs(uP));
-                        real_t flux = 0.5 * (0.5*(uM*uM + uP*uP) - alpha*(uP - uM));
-                        
-                        // Store scaled flux
-                        real_t normalFlux = flux * (nx[fIdx] + ny[fIdx] + nz[fIdx]);
-                        faceFlux[elem*NFACES_TET*NFP_TET + face*NFP_TET + fp] = normalFlux * Fscale[fIdx];
                     }
                 }
             }
@@ -342,20 +347,22 @@ func buildKernels(builder *DGKernel.KernelBuilder, el *DG3D.Element3D, fb *faceb
             MATMUL_LIFT(faceFlux, lifted, K[part]);
             
             // Update solution for all elements
-            for (int elem = 0; elem < K[part]; ++elem; @inner) {
-                // Update residual
-                for (int n = 0; n < NP_TET; ++n) {
-                    int id = elem * NP_TET + n;
-                    resu[id] = a * u[id] + resu[id];
-                }
-                
-                // Volume contribution: div(F) where F = u²/2
-                for (int n = 0; n < NP_TET; ++n) {
-                    int id = elem * NP_TET + n;
-                    real_t rhs = -u[id] * (ux[id] + uy[id] + uz[id]);
+            for (int elem = 0; elem < KpartMax; ++elem; @inner) {
+                if (elem < K[part]) {
+                    // Update residual
+                    for (int n = 0; n < NP_TET; ++n) {
+                        int id = elem * NP_TET + n;
+                        resu[id] = a * u[id] + resu[id];
+                    }
                     
-                    // Update solution
-                    u[id] = resu[id] + b_dt * (rhs + lifted[id]);
+                    // Volume contribution: div(F) where F = u²/2
+                    for (int n = 0; n < NP_TET; ++n) {
+                        int id = elem * NP_TET + n;
+                        real_t rhs = -u[id] * (ux[id] + uy[id] + uz[id]);
+                        
+                        // Update solution
+                        u[id] = resu[id] + b_dt * (rhs + lifted[id]);
+                    }
                 }
             }`,
         })
@@ -395,6 +402,10 @@ dgKernel.AllocateArray("faceIndex", int64(K*Nfaces*4))
 // Remote connectivity arrays
 dgKernel.AllocateArray("remoteSendIndices", int64(fb.NumRemoteSends*4))
 dgKernel.AllocateArray("remoteSendOffsets", int64(fb.NumPartitions*4))
+
+// Remote receive mapping
+dgKernel.AllocateArray("receiveBufferToM", int64(fb.TotalReceiveSize*4))
+dgKernel.AllocateArray("totalReceiveSize", int64(fb.NumPartitions*4))
 }
 
 func copyMeshData(dgKernel *DGKernel.DGKernel, el *DG3D.Element3D, fb *facebuffer.FaceBuffer) {
@@ -425,6 +436,8 @@ dgKernel.CopyArrayToDevice("vmapM", el.VmapM)
 dgKernel.CopyArrayToDevice("faceIndex", fb.FaceIndex)
 dgKernel.CopyArrayToDevice("remoteSendIndices", fb.RemoteSendIndices)
 dgKernel.CopyArrayToDevice("remoteSendOffsets", fb.RemoteSendOffsets)
+dgKernel.CopyArrayToDevice("receiveBufferToM", fb.ReceiveBufferToM)
+dgKernel.CopyArrayToDevice("totalReceiveSize", fb.TotalReceiveSize)
 }
 
 func computeRemoteBufferSizes(fb *facebuffer.FaceBuffer, el *DG3D.Element3D) (
