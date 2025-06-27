@@ -9,9 +9,9 @@ DGKernelV3 provides a flexible, tag-based system for building discontinuous Gale
 ### Core Components
 
 1. **DataPallette**: Organizes and tags computational building blocks (matrices, vectors, geometric factors)
-2. **OperatorPallette**: Composes reusable DG operators from DataPallette elements
-3. **KernelBuilder**: Orchestrates multi-stage kernel construction with automatic memory management and element registration
-4. **DGKernel**: Manages execution lifecycle and parameter marshaling
+1. **OperatorPallette**: Composes reusable DG operators from DataPallette elements
+1. **KernelBuilder**: Orchestrates multi-stage kernel construction with automatic memory management and element registration
+1. **DGKernel**: Manages execution lifecycle and parameter marshaling
 
 ### Design Principles
 
@@ -29,6 +29,7 @@ DGKernelV3 provides a flexible, tag-based system for building discontinuous Gale
 Groups related computational elements with descriptive tags and stride computation.
 
 #### Key Features
+
 - Flexible matrix and data registration
 - Tag-based querying and organization
 - Custom stride computation per group
@@ -36,6 +37,7 @@ Groups related computational elements with descriptive tags and stride computati
 - Automatic population from element registration
 
 #### Example Usage
+
 ```go
 pallette := NewDataPallette()
 
@@ -67,6 +69,7 @@ pallette.AddMatrixGroup("TetMetrics",
 Provides a registry of DG operators that can be queried and validated against available data.
 
 #### Key Features
+
 - Explicit dependency declaration
 - Workspace requirement specification
 - Automatic parameter aggregation
@@ -74,6 +77,7 @@ Provides a registry of DG operators that can be queried and validated against av
 - Automatic generation from element personalities
 
 #### Example Operator Registration
+
 ```go
 ops := NewOperatorPallette()
 
@@ -84,9 +88,9 @@ ops.RegisterOperator("Gradient",
         Outputs:     []string{"ur", "us", "ut"},
         StaticData:  []string{"Dr", "Ds", "Dt"},
         Workspace:   WorkspaceSpec{
-            "tmp1": {Size: "NP"},
-            "tmp2": {Size: "NP"},
-            "tmp3": {Size: "NP"},
+            "tmp1": {Dims: []ArrayDim{DIM_NP, DIM_K}},
+            "tmp2": {Dims: []ArrayDim{DIM_NP, DIM_K}},
+            "tmp3": {Dims: []ArrayDim{DIM_NP, DIM_K}},
         },
         Generator: gradientMacroGenerator,
     })
@@ -96,7 +100,37 @@ ops.RegisterOperator("Gradient",
 
 Pre-defined patterns that describe how element types fulfill standard operator contracts.
 
+#### IOSpec Structure
+
+```go
+// Size dimensions for operator arrays
+type ArrayDim int
+const (
+    DIM_NP ArrayDim = iota      // Nodes per element
+    DIM_NFP                     // Nodes per face
+    DIM_NFACES                  // Number of faces
+    DIM_K                       // Elements per partition
+)
+
+type IOSpec struct {
+    Name       string      // Variable name
+    Dims       []ArrayDim  // Dimensions that multiply to get size
+    Meaning    string      // Description
+    Accumulate bool        // If true, += instead of =
+}
+
+type OperatorBinding struct {
+    RequiredMatrices []string
+    RequiredGeometry []string
+    MacroPattern     string
+    Inputs           []IOSpec  // Expected inputs (provided by user/other ops)
+    Outputs          []IOSpec  // Arrays this operator produces
+    Workspace        []IOSpec  // Internal temporary arrays
+}
+```
+
 #### ElementProvider Interface
+
 ```go
 type ElementProvider interface {
     // Element identification
@@ -122,6 +156,7 @@ type ElementProvider interface {
 ```
 
 #### Pre-defined Personalities
+
 ```go
 var NUDGPersonality = &ElementPersonality{
     Name: "NUDG",
@@ -131,21 +166,58 @@ var NUDGPersonality = &ElementPersonality{
         "Gradient": {
             RequiredMatrices: []string{"Dr", "Ds", "Dt"},
             MacroPattern: "nudg_gradient",
+            Outputs: []IOSpec{
+                {Name: "ur", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "r-derivative"},
+                {Name: "us", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "s-derivative"},
+                {Name: "ut", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "t-derivative"},
+            },
         },
         "PhysicalGradient": {
             RequiredMatrices: []string{"Dr", "Ds", "Dt"},
             RequiredGeometry: []string{"rx", "ry", "rz", "sx", "sy", "sz", "tx", "ty", "tz"},
             MacroPattern: "nudg_physical_gradient",
+            Outputs: []IOSpec{
+                {Name: "ux", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "x-derivative"},
+                {Name: "uy", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "y-derivative"},
+                {Name: "uz", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "z-derivative"},
+            },
+            Workspace: []IOSpec{
+                {Name: "ur", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "temp r-derivative"},
+                {Name: "us", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "temp s-derivative"},
+                {Name: "ut", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "temp t-derivative"},
+            },
         },
         "SurfaceLift": {
             RequiredMatrices: []string{"LIFT"},
             RequiredGeometry: []string{"Fscale"},
             MacroPattern: "nudg_surface_lift",
+            Inputs: []IOSpec{
+                {Name: "face_flux", Dims: []ArrayDim{DIM_NFP, DIM_NFACES, DIM_K}, Meaning: "flux at faces"},
+            },
+            Outputs: []IOSpec{
+                {Name: "volume_rhs", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "lifted to volume", Accumulate: true},
+            },
+            Workspace: []IOSpec{
+                {Name: "scaled_flux", Dims: []ArrayDim{DIM_NFP, DIM_NFACES, DIM_K}, Meaning: "flux * Fscale"},
+            },
         },
         "Divergence": {
             RequiredMatrices: []string{"Dr", "Ds", "Dt"},
             RequiredGeometry: []string{"rx", "ry", "rz", "sx", "sy", "sz", "tx", "ty", "tz"},
             MacroPattern: "nudg_divergence",
+            Inputs: []IOSpec{
+                {Name: "vx", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "x-component"},
+                {Name: "vy", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "y-component"},
+                {Name: "vz", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "z-component"},
+            },
+            Outputs: []IOSpec{
+                {Name: "div_v", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "divergence"},
+            },
+            Workspace: []IOSpec{
+                {Name: "vxr", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "dvx/dr"},
+                {Name: "vys", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "dvy/ds"},
+                {Name: "vzt", Dims: []ArrayDim{DIM_NP, DIM_K}, Meaning: "dvz/dt"},
+            },
         },
     },
 }
@@ -156,6 +228,7 @@ var NUDGPersonality = &ElementPersonality{
 Orchestrates kernel construction with support for multiple stages and automatic memory management.
 
 #### Extended Features
+
 - Element definition registry
 - Automatic operator generation from personalities
 - Partition-element mapping
@@ -164,6 +237,7 @@ Orchestrates kernel construction with support for multiple stages and automatic 
 - Array dependency tracking
 
 #### Element Registration
+
 ```go
 type KernelBuilder struct {
     dgKernel         *DGKernel
@@ -259,7 +333,10 @@ Operators are generated as macros that encapsulate the @inner loop structure:
 
 // Example: Physical gradient with metric tensor
 #define PhysicalGradient_TET_3(u, ux, uy, uz, K) do { \
-    real_t ur[20*K], us[20*K], ut[20*K]; \
+    /* Workspace arrays ur, us, ut are reused from kernel-level allocation */ \
+    real_t* ur = workspace_tmp1; \
+    real_t* us = workspace_tmp2; \
+    real_t* ut = workspace_tmp3; \
     Gradient_TET_3(u, ur, us, ut, K); \
     for (int i = 0; i < 20*K; ++i; @inner) { \
         ux[i] = rx[i]*ur[i] + sx[i]*us[i] + tx[i]*ut[i]; \
@@ -267,15 +344,72 @@ Operators are generated as macros that encapsulate the @inner loop structure:
         uz[i] = rz[i]*ur[i] + sz[i]*us[i] + tz[i]*ut[i]; \
     } \
 } while(0)
+
+// Example: Surface lift with accumulation
+#define SurfaceLift_TET_3(face_flux, volume_rhs, K) do { \
+    real_t* scaled_flux = workspace_tmp1; \
+    for (int i = 0; i < 40*K; ++i; @inner) { \
+        scaled_flux[i] = face_flux[i] * Fscale[i]; \
+    } \
+    MATMUL_LIFT_ACCUMULATE(scaled_flux, volume_rhs, K, 20); \
+} while(0)
 ```
 
 ### Workspace Management
 
 KernelBuilder analyzes workspace requirements across all operators in a stage and automatically:
-1. Calculates maximum sizes needed for each workspace variable
-2. Generates workspace allocations in the kernel
-3. Enables workspace reuse between operators
-4. Removes workspace parameters from operator signatures
+
+1. **Identifies operator outputs**: Arrays produced by operators become available to subsequent operations
+1. **Allocates workspace**: Temporary arrays are allocated once per partition
+1. **Manages array reuse**: Workspace can be reused between non-overlapping operations
+1. **Generates declarations**: Workspace arrays are declared at the beginning of the kernel
+
+#### Workspace Analysis Example
+
+```go
+// When building a stage with operators
+builder.AddStage("computeRHS", StageSpec{
+    Operators: []string{"PhysicalGradient", "Divergence"},
+    Inputs:    []string{"u"},  // User only specifies primary input
+    Outputs:   []string{"rhs"},
+})
+
+// KernelBuilder analyzes operator specifications:
+// - PhysicalGradient outputs: ux, uy, uz (each sized [NP][K])
+// - PhysicalGradient workspace: ur, us, ut (each sized [NP][K])
+// - Divergence can use ux, uy, uz as inputs
+// - Divergence workspace: vxr, vys, vzt (each sized [NP][K])
+
+// Size calculation from element:
+// NP = elem.Np() = 20 (for TET order 3)
+// K = partition K value
+// Total size = 20 * K[part]
+```
+
+#### Generated Kernel Structure
+
+```c
+@kernel void computeRHS(...) {
+    for (int part = 0; part < NPART; ++part; @outer) {
+        // Auto-generated workspace declarations
+        real_t workspace_ux[MAX_NP * MAX_K];
+        real_t workspace_uy[MAX_NP * MAX_K];
+        real_t workspace_uz[MAX_NP * MAX_K];
+        real_t workspace_tmp1[MAX_NP * MAX_K];  // Reused ur/vxr
+        real_t workspace_tmp2[MAX_NP * MAX_K];  // Reused us/vys
+        real_t workspace_tmp3[MAX_NP * MAX_K];  // Reused ut/vzt
+        
+        // Partition-specific views
+        real_t* ux = workspace_ux;
+        real_t* uy = workspace_uy;
+        real_t* uz = workspace_uz;
+        
+        // User code can now use operators
+        PhysicalGradient(u, ux, uy, uz, K[part]);
+        // ux, uy, uz are now available for use
+    }
+}
+```
 
 ## Multi-Element Support
 
@@ -390,20 +524,21 @@ builder.GetDataPallette().AddMatrixGroup("CustomMatrices",
 ### Build-Time Validation
 
 1. **Stride Compatibility**: Verify array dimensions match operator requirements
-2. **Operator Availability**: Ensure all required operators exist for each element type
-3. **Data Completeness**: Check that operators have access to required matrices
-4. **Dependency Satisfaction**: Verify stage outputs satisfy subsequent stage inputs
-5. **Element Personality**: Validate element provides data required by personality
+1. **Operator Availability**: Ensure all required operators exist for each element type
+1. **Data Completeness**: Check that operators have access to required matrices
+1. **Dependency Satisfaction**: Verify stage outputs satisfy subsequent stage inputs
+1. **Element Personality**: Validate element provides data required by personality
 
 ### Operator Naming System
 
 DGKernelV3 automatically generates minimal operator names needed to distinguish between implementations:
 
 1. **Single Implementation**: If only one variant exists, use the base operator name
-2. **Multiple Variants**: Include only tags that differ between implementations
-3. **Hierarchical Naming**: Start with operator name, add element type, then order if needed
+1. **Multiple Variants**: Include only tags that differ between implementations
+1. **Hierarchical Naming**: Start with operator name, add element type, then order if needed
 
 Example naming progression:
+
 - `Gradient` (if only one implementation)
 - `Gradient_TET` (if multiple element types)
 - `Gradient_TET_3` (if multiple orders of same element type)
@@ -411,12 +546,12 @@ Example naming progression:
 ## Benefits
 
 1. **Flexibility**: No hardcoded assumptions about element types or numerical methods
-2. **Extensibility**: New element types and formulations integrate naturally
-3. **Performance**: Zero-overhead abstractions with compile-time macro generation
-4. **Correctness**: Build-time validation catches dimension mismatches
-5. **Clarity**: Tag-based organization makes code self-documenting
-6. **Automation**: Element registration automatically provides standard operators
-7. **Reusability**: Element definitions used across multiple partitions and simulations
+1. **Extensibility**: New element types and formulations integrate naturally
+1. **Performance**: Zero-overhead abstractions with compile-time macro generation
+1. **Correctness**: Build-time validation catches dimension mismatches
+1. **Clarity**: Tag-based organization makes code self-documenting
+1. **Automation**: Element registration automatically provides standard operators
+1. **Reusability**: Element definitions used across multiple partitions and simulations
 
 ## Implementation Notes
 
